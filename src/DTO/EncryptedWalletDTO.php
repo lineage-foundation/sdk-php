@@ -1,6 +1,6 @@
 <?php
 
-namespace IODigital\ABlockPHP\DTO;
+namespace Lineage\DTO;
 
 class EncryptedWalletDTO
 {

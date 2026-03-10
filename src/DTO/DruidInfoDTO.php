@@ -1,8 +1,8 @@
 <?php
 
-namespace IODigital\ABlockPHP\DTO;
+namespace Lineage\DTO;
 
-use IODigital\ABlockPHP\Functions\KeyHelpers;
+use Lineage\Functions\KeyHelpers;
 
 class DruidInfoDTO
 {

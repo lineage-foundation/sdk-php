@@ -1,6 +1,6 @@
 <?php
 
-namespace IODigital\ABlockPHP\Functions;
+namespace Lineage\Functions;
 
 class IntercomUtils
 {

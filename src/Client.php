@@ -1,24 +1,24 @@
 <?php
 
-namespace IODigital\ABlockPHP;
+namespace Lineage;
 
 use Exception;
 use GuzzleHttp\Client as HttpClient;
-use IODigital\ABlockPHP\DTO\DecryptedWalletDTO;
-use IODigital\ABlockPHP\DTO\DruidInfoDTO;
-use IODigital\ABlockPHP\DTO\EncryptedKeypairDTO;
-use IODigital\ABlockPHP\DTO\EncryptedWalletDTO;
-use IODigital\ABlockPHP\DTO\PaymentAssetDTO;
-use IODigital\ABlockPHP\DTO\PaymentExpectationDTO;
-use IODigital\ABlockPHP\DTO\TransactionDTO;
-use IODigital\ABlockPHP\DTO\TransactionOutputDTO;
-use IODigital\ABlockPHP\Exceptions\ActiveWalletNotSetException;
-use IODigital\ABlockPHP\Exceptions\PassPhraseNotSetException;
-use IODigital\ABlockPHP\Functions\IntercomUtils;
-use IODigital\ABlockPHP\Functions\KeyHelpers;
-use IODigital\ABlockPHP\Traits\MakesRequests;
+use Lineage\DTO\DecryptedWalletDTO;
+use Lineage\DTO\DruidInfoDTO;
+use Lineage\DTO\EncryptedKeypairDTO;
+use Lineage\DTO\EncryptedWalletDTO;
+use Lineage\DTO\PaymentAssetDTO;
+use Lineage\DTO\PaymentExpectationDTO;
+use Lineage\DTO\TransactionDTO;
+use Lineage\DTO\TransactionOutputDTO;
+use Lineage\Exceptions\ActiveWalletNotSetException;
+use Lineage\Exceptions\PassPhraseNotSetException;
+use Lineage\Functions\IntercomUtils;
+use Lineage\Functions\KeyHelpers;
+use Lineage\Traits\MakesRequests;
 
-class ABlockClient
+class Client
 {
     use MakesRequests;
 
@@ -67,7 +67,7 @@ class ABlockClient
     }
 
     /**
-     * Creates and returns an encrypted A-Block wallet. The return value includes the 12-word mnemonic
+     * Creates and returns an encrypted Lineage wallet. The return value includes the 12-word mnemonic
      * Seed Phrase, which is to be stored securely by the owner of this wallet
      *
      * @return EncryptedWalletDTO

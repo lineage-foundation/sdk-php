@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace IODigital\ABlockPHP\Traits;
+namespace Lineage\Traits;
 
 use Exception;
 use Illuminate\Http\Response;

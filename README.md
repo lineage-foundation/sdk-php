@@ -1,6 +1,6 @@
-# a-block-php
+# lineage/php
 
-Composer package for direct communication with A-Block's API
+Composer package for direct communication with the Lineage blockchain API
 
 ## Requirements
 
@@ -11,21 +11,21 @@ Composer package for direct communication with A-Block's API
 
 - Create wallets
 - Create addresses/keypairs for wallets
-- Create item assets (A-Block's equivalent to NFTs) related to keypairs
+- Create item assets (Lineage equivalents to NFTs) related to keypairs
 - Transfer assets (Items or Tokens) to another address
 - Initiate and complete Dual Double Entry (DDE) using a DRUID to trade assets between addresses
 
 ## Installation
 
-- Simply run `composer require io-digital/a-block-php`
-- Include `IODigital\ABlockPHP\ABlockClient` in your PHP code and you're ready to go
-- Instantiate the above client with `
+- Simply run `composer require lineage/php`
+- Include `Lineage\Client` in your PHP code and you're ready to go
+- Instantiate the client with `
 
 ## A note on Data Transfer Objects (DTOs)
 
 This package makes use of PHP's typing of function definitions to increase robustness. Many of the client's functions require a Data Transfer Object (DTO) to be passed as input and some return a DTO. Some usage examples below will illustrate this.
 
-It may seem cumbersome at first but it helps ensure that the data we send to the A-Block API is formatted correctly.
+It may seem cumbersome at first but it helps ensure that the data we send to the Lineage API is formatted correctly.
 
 ## Usage Examples
 
@@ -34,7 +34,7 @@ These are listed in an order that you could follow to do most of the things this
 ### Instantiating the client
 
 ```
-$client = new ABlockClient(
+$client = new \Lineage\Client(
     computeHost: 'http://your-compute-host',
     intercomHost: 'http://your-intercom-host'
 );
@@ -92,7 +92,7 @@ $itemAssetArr = $client->createAsset(
 );
 ```
 
-Please note that this newly created asset will only reflect in a `fetchBalance` enquiry once it has been verified by A-Block's compute node.
+Please note that this newly created asset will only reflect in a `fetchBalance` enquiry once it has been verified by the Lineage compute node.
 
 ## Links
 

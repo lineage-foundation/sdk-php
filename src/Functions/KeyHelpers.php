@@ -1,9 +1,9 @@
 <?php
 
-namespace IODigital\ABlockPHP\Functions;
+namespace Lineage\Functions;
 
 use FurqanSiddiqui\BIP39\BIP39;
-use IODigital\ABlockPHP\Exceptions\KeypairNotDecryptedException;
+use Lineage\Exceptions\KeypairNotDecryptedException;
 
 class KeyHelpers
 {
