@@ -1,0 +1,31 @@
+{
+    "name": "lineage/php",
+    "description": "Composer package for the Lineage blockchain",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "blockchain",
+        "lineage"
+    ],
+    "autoload": {
+        "psr-4": {
+            "Lineage\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Lineage Foundation",
+            "email": "info@lineage.foundation",
+            "role": "developer"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "furqansiddiqui/bip39-mnemonic-php": "^0.1.7",
+        "guzzlehttp/guzzle": "^7.0"
+    },
+    "support": {
+        "source": "https://github.com/lineage-foundation/sdk-php",
+        "issues": "https://github.com/lineage-foundation/sdk-php/issues"
+    }
+}
