@@ -4,6 +4,7 @@ namespace Lineage\Functions;
 
 use FurqanSiddiqui\BIP39\BIP39;
 use Lineage\Exceptions\KeypairNotDecryptedException;
+use Lineage\Serialization;
 
 class KeyHelpers
 {
@@ -226,26 +227,46 @@ class KeyHelpers
         return 'DRUID0x' . self::getPassPhraseHash(sodium_bin2hex(random_bytes(32)));
     }
 
-    public static function constructTransactionInputAddress(array $inputs): string
+    /**
+     * The /v1 transaction input signable hash: sha3-256 of the concatenated
+     * compact-JSON encoding of each of this input's consuming tx_outs
+     * followed by the compact-JSON encoding of the previous out-point being
+     * spent (or "null" if there is none). Matches sdk-go/sdk-js exactly —
+     * see sdk-go/tx.go's constructTxInOutSignableHash.
+     *
+     * @param array|null $prevOut
+     * @param array $txOuts
+     */
+    public static function constructTxInOutSignableHash(?array $prevOut, array $txOuts): string
     {
-        $signableTxIns = implode('-', array_map(function ($input) {
-            $scriptSignature = $input['script_signature']['Pay2PkH'];
-            $previousOutPoint = $input['previous_out'];
+        $preimage = '';
+        foreach ($txOuts as $txOut) {
+            $preimage .= Serialization::json($txOut);
+        }
+        $preimage .= Serialization::json($prevOut);
 
-            $scriptStack = self::getPayToPublicKeyHashScript(
-                checkData: $scriptSignature['signable_data'],
-                signatureData: $scriptSignature['signature'],
-                publicKeyData: $scriptSignature['public_key'],
-                addressVersion: $scriptSignature['address_version']
-            );
+        return hash('sha3-256', $preimage);
+    }
 
-            $formattedScriptString = implode('-', array_map(fn($item) => "{$item['type']}:{$item['value']}", $scriptStack));
-            $previousOutpointStr = $previousOutPoint ? self::getFormattedOutPointString($previousOutPoint) : 'null';
+    /**
+     * Sign a signable hash. CRITICAL: signs the UTF-8 bytes of the 64-char
+     * hex string representation of the hash, not the raw digest bytes —
+     * this must match sdk-js's behaviour exactly.
+     */
+    public static function constructSignature(string $signableHashHex, string $secretKey): string
+    {
+        return sodium_bin2hex(sodium_crypto_sign_detached($signableHashHex, $secretKey));
+    }
 
-            return "$previousOutpointStr-$formattedScriptString";
-        }, $inputs));
+    /**
+     * The signable hash of an Item/Token asset (used e.g. for genesis
+     * hashes): sha3-256 of "Token:<amount>" or "Item:<amount>".
+     */
+    public static function constructItemAssetSignableHash(array $asset): string
+    {
+        $preimage = isset($asset['Token']) ? 'Token:' . $asset['Token'] : 'Item:' . $asset['Item']['amount'];
 
-        return self::constructAddress($signableTxIns);
+        return hash('sha3-256', $preimage);
     }
 
     public static function constructAddress(string $publicKeyBytes): string
