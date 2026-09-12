@@ -141,6 +141,15 @@ class KeyHelpers
         return sodium_bin2hex(sodium_crypto_sign_detached($message, $secretKey));
     }
 
+    public static function keypairFromSeed(string $seed32): array
+    {
+        $raw = sodium_crypto_sign_seed_keypair($seed32);
+        return [
+            'publicKey' => sodium_crypto_sign_publickey($raw),
+            'secretKey' => sodium_crypto_sign_secretkey($raw),
+        ];
+    }
+
     public static function generateDRUID(): string
     {
         return 'DRUID0x' . self::getPassPhraseHash(sodium_bin2hex(random_bytes(32)));
