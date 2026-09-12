@@ -94,17 +94,22 @@ class KeyHelpers
         ];
     }
 
+    /**
+     * Decrypt a keystore record produced by encryptKeypair (or the sdk-js
+     * equivalent). The nonce is used as-is: sdk-js stores the first 24 raw
+     * characters of a v4 UUID as the secretbox nonce, so it is NOT hex or
+     * base64 decoded here.
+     */
     public static function decryptKeypair(
-        string $encryptedKey,
+        string $save,
         string $nonce,
-        string $passPhrase
+        string $passphraseKey
     ): array {
-        $encryptedKeyPair = sodium_base642bin($encryptedKey, SODIUM_BASE64_VARIANT_ORIGINAL);
-        $nonce = sodium_hex2bin($nonce);
+        $encryptedKeyPair = sodium_base642bin($save, SODIUM_BASE64_VARIANT_ORIGINAL);
 
-        $decrypted = sodium_crypto_secretbox_open($encryptedKeyPair, $nonce, $passPhrase);
+        $decrypted = sodium_crypto_secretbox_open($encryptedKeyPair, $nonce, $passphraseKey);
 
-        if (!$decrypted) {
+        if ($decrypted === false) {
             throw new KeypairNotDecryptedException();
         }
 
@@ -112,6 +117,47 @@ class KeyHelpers
             'publicKey' => substr($decrypted, 0, SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES),
             'secretKey' => substr($decrypted, SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES, SODIUM_CRYPTO_SIGN_SECRETKEYBYTES),
         ];
+    }
+
+    /**
+     * Encrypt a keypair for storage, matching sdk-js's keystore record shape:
+     * plaintext = publicKey(32) . secretKey(64), sealed with
+     * sodium_crypto_secretbox under the passphraseKey, using a nonce that is
+     * the first 24 raw bytes of a v4 UUID string.
+     *
+     * @return array{nonce:string,save:string}
+     */
+    public static function encryptKeypair(
+        string $publicKey,
+        string $secretKey,
+        string $passphraseKey,
+        ?string $nonce = null
+    ): array {
+        $nonce ??= substr(self::generateUuidV4(), 0, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+
+        $save = sodium_crypto_secretbox($publicKey . $secretKey, $nonce, $passphraseKey);
+
+        return [
+            'nonce' => $nonce,
+            'save'  => sodium_bin2base64($save, SODIUM_BASE64_VARIANT_ORIGINAL),
+        ];
+    }
+
+    private static function generateUuidV4(): string
+    {
+        $bytes = random_bytes(16);
+        $bytes[6] = chr((ord($bytes[6]) & 0x0f) | 0x40);
+        $bytes[8] = chr((ord($bytes[8]) & 0x3f) | 0x80);
+        $hex = bin2hex($bytes);
+
+        return sprintf(
+            '%s-%s-%s-%s-%s',
+            substr($hex, 0, 8),
+            substr($hex, 8, 4),
+            substr($hex, 12, 4),
+            substr($hex, 16, 4),
+            substr($hex, 20, 12)
+        );
     }
 
     public static function encryptTransaction(array $transaction, string $passPhrase): array
@@ -141,9 +187,19 @@ class KeyHelpers
         return json_decode($decryptedTransaction, true);
     }
 
+    /**
+     * Derive the secretbox key from a passphrase, matching sdk-js's
+     * getPassphraseBuffer: the ASCII of the first 32 hex characters of the
+     * sha3-256 digest (NOT the raw digest bytes).
+     */
+    public static function passphraseKey(string $passphrase): string
+    {
+        return substr(hash('sha3-256', $passphrase), 0, SODIUM_CRYPTO_SECRETBOX_KEYBYTES);
+    }
+
     public static function getPassPhraseHash(string $passPhrase): string
     {
-        return substr(hash('sha3-256', $passPhrase), 0, SODIUM_CRYPTO_SECRETBOX_KEYBYTES);
+        return self::passphraseKey($passPhrase);
     }
 
     private static function generateSeed(int $length = 12): string
