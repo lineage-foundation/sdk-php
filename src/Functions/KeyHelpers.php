@@ -54,23 +54,38 @@ class KeyHelpers
         ];
     }
 
-    public static function getNewKeypair(string $masterPrivateKey, string $passPhrase, array $existingAddresses = []): array
+    /**
+     * Derive the ed25519 keypair (and address) at the given hardened BIP32 index.
+     *
+     * The ed25519 seed is the first 32 bytes of the ASCII xprv Base58Check
+     * string of the derived child key (matches sdk-js).
+     *
+     * @return array{publicKey:string,secretKey:string,address:string}
+     */
+    public static function deriveKeypair(string $mnemonic, string $passphrase, int $index): array
     {
-        $counter = count($existingAddresses);
+        $master = Bip32::masterXprv(Bip32::mnemonicToSeed($mnemonic, $passphrase));
+        $childXprv = Bip32::childXprv($master, $index);
+        $edSeed = substr($childXprv, 0, SODIUM_CRYPTO_SIGN_SEEDBYTES);
+
+        $keypair = self::keypairFromSeed($edSeed);
+        $keypair['address'] = self::constructAddress($keypair['publicKey']);
+
+        return $keypair;
+    }
+
+    public static function getNewKeypair(string $mnemonic, string $passPhrase, array $existingAddresses = []): array
+    {
+        $index = count($existingAddresses);
 
         do {
-            $seedKey = self::generateMasterKey($masterPrivateKey, $passPhrase, $counter);
+            $keypair = self::deriveKeypair($mnemonic, $passPhrase, $index);
+            $address = $keypair['address'];
+            $index++;
+        } while (in_array($address, $existingAddresses, true));
 
-            $keypairRaw = sodium_crypto_sign_seed_keypair(substr($seedKey, 0, SODIUM_CRYPTO_SIGN_SEEDBYTES));
-            $publicKey = sodium_crypto_sign_publickey($keypairRaw);
-            $address = self::constructAddress($publicKey);
-            $counter++;
-        } while (in_array($address, $existingAddresses));
-
-        $privateKey = sodium_crypto_sign_secretkey($keypairRaw);
         $nonce = self::getNonce();
-
-        $save = sodium_crypto_secretbox($publicKey . $privateKey, $nonce, $passPhrase);
+        $save = sodium_crypto_secretbox($keypair['publicKey'] . $keypair['secretKey'], $nonce, $passPhrase);
 
         return [
             'address' => $address,
