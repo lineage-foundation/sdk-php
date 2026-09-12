@@ -9,6 +9,16 @@ use Lineage\Serialization;
 class KeyHelpers
 {
     /**
+     * The BIP39 passphrase every keypair derivation uses. sdk-js's
+     * generateMasterKey/mgmtClient.initNew et al. never pass a BIP39
+     * passphrase (it defaults to ''); the wallet's own passphrase only ever
+     * encrypts the keystore (mnemonic and individual keypairs) at rest, via
+     * passphraseKey(). Fixing this avoids conflating the two and matches
+     * sdk-go's bip39Passphrase constant.
+     */
+    private const BIP39_PASSPHRASE = '';
+
+    /**
      * Returns array with seed phrase, nonce, save
      */
     public static function initialiseFromPassphrase(string $passPhraseHash, ?string $seedPhrase = null): array
@@ -75,23 +85,32 @@ class KeyHelpers
         return $keypair;
     }
 
-    public static function getNewKeypair(string $mnemonic, string $passPhrase, array $existingAddresses = []): array
+    /**
+     * Derive and encrypt the next unused keypair: starting at
+     * index = count($existingAddresses), derive keypairs at increasing
+     * indices until one whose address isn't already in $existingAddresses is
+     * found, matching sdk-js's generateNewKeypairAndAddress / sdk-go's
+     * GetNewKeypair. $passphraseKey must already be a derived secretbox key
+     * (e.g. from passphraseKey()), not a raw passphrase — the returned
+     * nonce/save are produced by encryptKeypair(), so the result decrypts
+     * via decryptKeypair() with that same $passphraseKey.
+     */
+    public static function getNewKeypair(string $mnemonic, string $passphraseKey, array $existingAddresses = []): array
     {
         $index = count($existingAddresses);
 
         do {
-            $keypair = self::deriveKeypair($mnemonic, $passPhrase, $index);
+            $keypair = self::deriveKeypair($mnemonic, self::BIP39_PASSPHRASE, $index);
             $address = $keypair['address'];
             $index++;
         } while (in_array($address, $existingAddresses, true));
 
-        $nonce = self::getNonce();
-        $save = sodium_crypto_secretbox($keypair['publicKey'] . $keypair['secretKey'], $nonce, $passPhrase);
+        $encrypted = self::encryptKeypair($keypair['publicKey'], $keypair['secretKey'], $passphraseKey);
 
         return [
             'address' => $address,
-            'nonce'   => sodium_bin2hex($nonce),
-            'save'    => sodium_bin2base64($save, SODIUM_BASE64_VARIANT_ORIGINAL),
+            'nonce'   => $encrypted['nonce'],
+            'save'    => $encrypted['save'],
         ];
     }
 
@@ -142,6 +161,47 @@ class KeyHelpers
             'nonce' => $nonce,
             'save'  => sodium_bin2base64($save, SODIUM_BASE64_VARIANT_ORIGINAL),
         ];
+    }
+
+    /**
+     * Seal an arbitrary string under a passphrase-derived key, matching
+     * sdk-go's sealMnemonic: sodium_crypto_secretbox with a fresh
+     * v4-UUID-derived nonce (same convention as encryptKeypair). Used by
+     * Client::createWallet to seal the wallet's BIP39 mnemonic — this SDK
+     * derives every keypair directly from the mnemonic (see getNewKeypair),
+     * so the mnemonic itself, not a separate BIP32 master key, is the
+     * reconstructable wallet state.
+     *
+     * @return array{nonce:string,save:string}
+     */
+    public static function encryptMnemonic(string $mnemonic, string $passphraseKey, ?string $nonce = null): array
+    {
+        $nonce ??= substr(self::generateUuidV4(), 0, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+
+        $save = sodium_crypto_secretbox($mnemonic, $nonce, $passphraseKey);
+
+        return [
+            'nonce' => $nonce,
+            'save'  => sodium_bin2base64($save, SODIUM_BASE64_VARIANT_ORIGINAL),
+        ];
+    }
+
+    /**
+     * Open a mnemonic sealed by encryptMnemonic (or sdk-go's sealMnemonic).
+     */
+    public static function decryptMnemonic(string $save, string $nonce, string $passphraseKey): string
+    {
+        $decrypted = sodium_crypto_secretbox_open(
+            sodium_base642bin($save, SODIUM_BASE64_VARIANT_ORIGINAL),
+            $nonce,
+            $passphraseKey
+        );
+
+        if ($decrypted === false) {
+            throw new KeypairNotDecryptedException();
+        }
+
+        return $decrypted;
     }
 
     private static function generateUuidV4(): string
@@ -203,7 +263,7 @@ class KeyHelpers
         return self::passphraseKey($passPhrase);
     }
 
-    private static function generateSeed(int $length = 12): string
+    public static function generateSeed(int $length = 12): string
     {
         return implode(' ', BIP39::Generate($length)->words);
     }

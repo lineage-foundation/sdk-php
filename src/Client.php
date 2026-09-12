@@ -4,17 +4,15 @@ namespace Lineage;
 
 use Exception;
 use Lineage\DTO\DecryptedWalletDTO;
-use Lineage\DTO\DruidInfoDTO;
 use Lineage\DTO\EncryptedKeypairDTO;
 use Lineage\DTO\EncryptedWalletDTO;
 use Lineage\DTO\PaymentAssetDTO;
-use Lineage\DTO\PaymentExpectationDTO;
-use Lineage\DTO\TransactionDTO;
-use Lineage\DTO\TransactionOutputDTO;
 use Lineage\Exceptions\ActiveWalletNotSetException;
+use Lineage\Exceptions\NotImplemented;
 use Lineage\Exceptions\PassPhraseNotSetException;
-use Lineage\Functions\IntercomUtils;
 use Lineage\Functions\KeyHelpers;
+use Lineage\Functions\TxBuilder;
+use Lineage\Serialization;
 use Lineage\Traits\MakesRequests;
 
 class Client
@@ -64,21 +62,28 @@ class Client
 
     /**
      * Creates and returns an encrypted Lineage wallet. The return value includes the 12-word mnemonic
-     * Seed Phrase, which is to be stored securely by the owner of this wallet
+     * Seed Phrase, which is to be stored securely by the owner of this wallet.
+     *
+     * Every keypair this SDK derives comes straight from the mnemonic
+     * (KeyHelpers::getNewKeypair/deriveKeypair), so — unlike the legacy
+     * PBKDF2-derived "master key" this used to seal — the wire/on-disk
+     * representation here seals the mnemonic itself under the wallet
+     * passphrase (KeyHelpers::encryptMnemonic), matching sdk-go's
+     * Wallet.InitNew/FromSeed.
      *
      * @return EncryptedWalletDTO
      */
     public function createWallet(?string $seedPhrase = null): EncryptedWalletDTO
     {
-        $walletArr = KeyHelpers::initialiseFromPassphrase($this->getPassPhrase(), $seedPhrase);
+        $mnemonic = $seedPhrase ?? KeyHelpers::generateSeed();
 
-        $walletDTO = new EncryptedWalletDTO(
-            masterKeyEncrypted: $walletArr['masterKeyEncrypted'],
-            nonce: $walletArr['nonce'],
-            seedPhrase: $walletArr['seedPhrase']
+        $encrypted = KeyHelpers::encryptMnemonic($mnemonic, $this->getPassPhrase());
+
+        return new EncryptedWalletDTO(
+            masterKeyEncrypted: $encrypted['save'],
+            nonce: $encrypted['nonce'],
+            seedPhrase: $mnemonic
         );
-
-        return $walletDTO;
     }
 
     /**
@@ -91,21 +96,15 @@ class Client
      */
     public function openWallet(EncryptedWalletDTO $wallet): bool
     {
-        try {
-            $masterKeyDecrypted = $this->decryptKeypair(
-                encryptedKey: $wallet->getMasterKeyEncrypted(),
-                nonce: $wallet->getNonce()
-            );
+        $mnemonic = KeyHelpers::decryptMnemonic(
+            save: $wallet->getMasterKeyEncrypted(),
+            nonce: $wallet->getNonce(),
+            passphraseKey: $this->getPassPhrase()
+        );
 
-            $this->walletDecrypted = new DecryptedWalletDTO(
-                masterPrivateKey: $masterKeyDecrypted['publicKey'],
-                chainCode: $masterKeyDecrypted['secretKey']
-            );
+        $this->walletDecrypted = new DecryptedWalletDTO(mnemonic: $mnemonic);
 
-            return true;
-        } catch (\Exception $e) {
-            throw $e;
-        }
+        return true;
     }
 
     /**
@@ -121,8 +120,8 @@ class Client
         }
 
         $keypairArr = KeyHelpers::getNewKeypair(
-            masterPrivateKey: $this->walletDecrypted->getMasterPrivateKey(),
-            passPhrase: $this->getPassPhrase(),
+            mnemonic: $this->walletDecrypted->getMnemonic(),
+            passphraseKey: $this->getPassPhrase(),
             existingAddresses: $existingAddresses
         );
 
@@ -237,39 +236,54 @@ class Client
     }
 
     /**
-     * Creates an item asset at the address associated with the encrypted keypair. Returns the item.
+     * Creates an item asset at the address associated with $keypair, signing
+     * the item-asset signable hash with its decrypted secret key, and
+     * submits `POST /v1/items`. $defaultGenesisHash selects between the
+     * well-known default item DRS transaction hash (true) and a freshly
+     * assigned one (false). Mirrors sdk-go's Wallet.CreateItems / sdk-js's
+     * Wallet.createItems.
      *
-     * @param string     $name         - this is the name that will be merged in with supplied meta data (if any)
-     * @param string     $encryptedKey - the encrypted keypair
-     * @param string     $nonce        - the nonce as returned by the keypair creation
-     * @param integer    $amount       - how many of these are we making
-     * @param boolean    $defaultHash  - if false, a generic item is created. If not, a hash that identifies this item will be generated
-     * @param array|null $metaData     - an optional key-value array of extra info
+     * Field order matters: it is built to be byte-identical to sdk-js's wire
+     * body (item.json's vector `payload`, minus the legacy `version` field
+     * sdk-js's request interface omits) — the server is serde/order
+     * independent, but this keeps the request comparable byte-for-byte
+     * against the golden vector.
      *
      * @return array
      */
-    public function createAsset(
-        string $name,
-        string $encryptedKey,
-        string $nonce,
-        int $amount,
-        bool $defaultHash,
-        ?array $metaData = [],
-    ): PaymentAssetDTO {
-        // The legacy compute-node asset-creation path is gone under /v1.
-        // Re-implemented against POST /v1/transactions:create in Task 10.
-        throw new \RuntimeException('migrating to /v1 — see Task 10');
-    }
-
-    public function sendAssetToAddress(
-        array $senderKeypairs,
-        string $address,
-        PaymentAssetDTO $asset,
-        ?string $excessAddress = null,
+    public function createItems(
+        EncryptedKeypairDTO $keypair,
+        bool $defaultGenesisHash = true,
+        int $amount = 1000,
+        ?string $metadata = null,
     ): array {
-        // The legacy compute-node payment path is gone under /v1.
-        // Re-implemented against POST /v1/transactions:create in Task 10.
-        throw new \RuntimeException('migrating to /v1 — see Task 10');
+        $decrypted = $this->decryptKeypair($keypair->getContent(), $keypair->getNonce());
+
+        $genesisHashSpec = $defaultGenesisHash ? 'Default' : 'Create';
+
+        // The genesis hash isn't part of the item-asset signable hash (it
+        // isn't known until the server assigns/resolves it) — matches
+        // sdk-js's createItemPayload / sdk-go's CreateItems.
+        $asset = Serialization::assetItem($amount, '', $metadata);
+        $signableHash = KeyHelpers::constructItemAssetSignableHash($asset);
+        $signature = KeyHelpers::constructSignature($signableHash, $decrypted['secretKey']);
+
+        $scriptPublicKey = KeyHelpers::constructAddress($decrypted['publicKey']);
+        $publicKeyHex = sodium_bin2hex($decrypted['publicKey']);
+
+        return $this->request(
+            method: self::POST,
+            host: $this->mempoolHost,
+            path: '/v1/items',
+            body: [
+                'item_amount' => $amount,
+                'script_public_key' => $scriptPublicKey,
+                'public_key' => $publicKeyHex,
+                'signature' => $signature,
+                'genesis_hash_spec' => $genesisHashSpec,
+                'metadata' => $metadata,
+            ],
+        );
     }
 
     public function getPaymentAssetObject(
@@ -284,6 +298,130 @@ class Client
         );
     }
 
+    /**
+     * Sends $amount Token assets to $paymentAddress, sourcing inputs from
+     * $allKeypairs's addresses and sending change to $excessKeypair's
+     * address. Mirrors sdk-go's Wallet.MakeTokenPayment / sdk-js's
+     * Wallet.makeTokenPayment.
+     *
+     * @param array<EncryptedKeypairDTO> $allKeypairs
+     *
+     * @return array
+     */
+    public function makeTokenPayment(
+        string $paymentAddress,
+        int $amount,
+        array $allKeypairs,
+        EncryptedKeypairDTO $excessKeypair,
+        int $locktime = 0,
+    ): array {
+        return $this->makePayment(
+            $paymentAddress,
+            Serialization::assetToken($amount),
+            $allKeypairs,
+            $excessKeypair,
+            $locktime
+        );
+    }
+
+    /**
+     * Sends $amount Item assets (of the given $genesisHash) to
+     * $paymentAddress, sourcing inputs from $allKeypairs's addresses and
+     * sending change to $excessKeypair's address. Mirrors sdk-go's
+     * Wallet.MakeItemPayment / sdk-js's Wallet.makeItemPayment.
+     *
+     * @param array<EncryptedKeypairDTO> $allKeypairs
+     *
+     * @return array
+     */
+    public function makeItemPayment(
+        string $paymentAddress,
+        int $amount,
+        string $genesisHash,
+        array $allKeypairs,
+        EncryptedKeypairDTO $excessKeypair,
+        ?string $metadata = null,
+        int $locktime = 0,
+    ): array {
+        return $this->makePayment(
+            $paymentAddress,
+            Serialization::assetItem($amount, $genesisHash, $metadata),
+            $allKeypairs,
+            $excessKeypair,
+            $locktime
+        );
+    }
+
+    /**
+     * Shared implementation behind makeTokenPayment/makeItemPayment: decrypt
+     * $allKeypairs, fetch their combined balance, build the payment
+     * transaction via TxBuilder::createPaymentTx, and submit it via
+     * `POST /v1/transactions`. Mirrors sdk-go's private Wallet.makePayment /
+     * sdk-js's private Wallet.makePayment.
+     *
+     * The submitted body is `{"transactions":[{...createTx,"fees":null}]}`
+     * — `fees` isn't part of the signed transaction, it's a separate,
+     * always-null field the /v1 DTO requires, appended last (matching
+     * sdk-js's `{...tx, fees: null}` spread).
+     *
+     * @param array $asset A Serialization asset array (Serialization::assetToken/assetItem).
+     * @param array<EncryptedKeypairDTO> $allKeypairs
+     */
+    private function makePayment(
+        string $paymentAddress,
+        array $asset,
+        array $allKeypairs,
+        EncryptedKeypairDTO $excessKeypair,
+        int $locktime,
+    ): array {
+        if (count($allKeypairs) === 0) {
+            throw new \RuntimeException('makePayment: no keypairs provided');
+        }
+
+        $addresses = [];
+        $keyPairs = [];
+
+        foreach ($allKeypairs as $encrypted) {
+            $decrypted = $this->decryptKeypair($encrypted->getContent(), $encrypted->getNonce());
+            $addresses[] = $encrypted->getAddress();
+            $keyPairs[$encrypted->getAddress()] = $decrypted;
+        }
+
+        $balance = $this->fetchBalance($addresses);
+
+        $tx = TxBuilder::createPaymentTx(
+            $paymentAddress,
+            $asset,
+            $excessKeypair->getAddress(),
+            $balance,
+            $keyPairs,
+            $locktime
+        );
+
+        return $this->request(
+            method: self::POST,
+            host: $this->mempoolHost,
+            path: '/v1/transactions',
+            body: [
+                'transactions' => [
+                    [
+                        'inputs' => $tx['inputs'],
+                        'outputs' => $tx['outputs'],
+                        'version' => $tx['version'],
+                        'druid_info' => $tx['druid_info'],
+                        'fees' => null,
+                    ],
+                ],
+            ],
+        );
+    }
+
+    /**
+     * 2-way payments (trade requests) are deferred until the /v1 endpoints
+     * for them land.
+     *
+     * @return never
+     */
     public function createTradeRequest(
         // the other party's address to send $myAsset to
         string $otherPartyAddress,
@@ -296,30 +434,20 @@ class Client
         // where to collect $myAsset from
         array $myKeypairs,
     ): array {
-        // The legacy intercom-based trade-request path is gone under /v1.
-        // Re-implemented against the /v1 transaction endpoints in Task 10.
-        throw new \RuntimeException('migrating to /v1 — see Task 10');
+        throw new NotImplemented();
     }
 
-    private function makePaymentPayload(
-        array $myKeypairs,
-        PaymentAssetDTO $myAsset,
-        string $otherPartyAddress,
-        ?string $excessAddress = null,
-        ?DruidInfoDTO $druidInfo = null
-    ): array {
-        // Re-implemented against the /v1 transaction endpoints in Task 10.
-        throw new \RuntimeException('migrating to /v1 — see Task 10');
-    }
-
-    //Not sure I agree with this - accepted transactions are processed in this function, as per the JS lib
+    /**
+     * 2-way payments (trade requests) are deferred until the /v1 endpoints
+     * for them land.
+     *
+     * @return never
+     */
     public function getPendingTransactions(
         array $keypairs,
         ?array $encryptedTransactionMap = []
     ): array {
-        // The legacy intercom get/accept/reject-data path is gone under /v1.
-        // Re-implemented against the /v1 transaction endpoints in Task 10.
-        throw new \RuntimeException('migrating to /v1 — see Task 10');
+        throw new NotImplemented();
     }
 
     public function acceptPendingTransaction(
@@ -344,140 +472,30 @@ class Client
         );
     }
 
-    private function getAmountAndHashFromExpectation(array $expectation): array
-    {
-        return array_keys($expectation['asset'])[0] === PaymentAssetDTO::ASSET_TYPE_ITEM ? [
-            'amount' => $expectation['asset'][PaymentAssetDTO::ASSET_TYPE_ITEM]['amount'],
-            'hash' => $expectation['asset'][PaymentAssetDTO::ASSET_TYPE_ITEM]['drs_tx_hash']
-        ] : [
-            'amount' => $expectation['asset'][PaymentAssetDTO::ASSET_TYPE_TOKEN],
-            'hash' => null
-        ];
-    }
-
+    /**
+     * 2-way payments (trade requests) are deferred until the /v1 endpoints
+     * for them land.
+     *
+     * @return never
+     */
     private function respondToPendingTransaction(
         string $status,
         string $druid,
         array $keypairs,
     ): array {
-        // The legacy intercom accept/reject path is gone under /v1.
-        // Re-implemented against the /v1 transaction endpoints in Task 10.
-        throw new \RuntimeException('migrating to /v1 — see Task 10');
-    }
-
-    private function getInputsForTransaction(
-        array $myKeypairs,
-        array $myBalance,
-        PaymentAssetDTO $myAsset
-    ): array {
-        $totalAmountGathered = 0;
-        $usedAddresses = [];
-        $depletedAddresses = [];
-        $addressVersion = null;
-        $inputs = [];
-
-        foreach ($myBalance['address_list'] as $address => $outPoints) {
-            $usedOutpointsCount = 0;
-            $keypair = $myKeypairs[$address];
-            $keypairDecrypted = $this->getDecryptedKeypair(address: $address, keypair: $keypair);
-
-            $outPointIndex = -1;
-
-            while($totalAmountGathered < $myAsset->getAmount() && $outPointIndex < count($outPoints)) {
-                $outPointIndex++;
-                $outPointArr = $outPoints[$outPointIndex];
-
-                // This outpoint doesn't have what we want
-                if(!isset($outPointArr['value'][$myAsset->getAssetType()]) ||
-                    ($myAsset->getAssetType() === PaymentAssetDTO::ASSET_TYPE_ITEM &&
-                    $outPointArr['value'][$myAsset->getAssetType()]['drs_tx_hash'] !== $myAsset->getDrsTxHash())) {
-                    continue;
-                }
-
-                $signableData = $this->getSignableAssetHash($outPointArr['out_point']);
-
-                $signature = KeyHelpers::createSignature($signableData, $keypairDecrypted['secretKey']);
-
-                array_push($inputs, [
-                    'script_signature' => ['Pay2PkH' => [
-                        'signable_data'   => $signableData ?? '',
-                        'signature'       => $signature,
-                        'public_key'      => sodium_bin2hex($keypairDecrypted['publicKey']),
-                        'address_version' => $addressVersion,
-                    ]],
-                    'previous_out' => $outPointArr['out_point'],
-                ]);
-
-                $totalAmountGathered += $myAsset->getAssetType() === PaymentAssetDTO::ASSET_TYPE_ITEM ? $outPointArr['value'][$myAsset->getAssetType()]['amount'] :
-                    $outPointArr['value'][$myAsset->getAssetType()];
-
-                if (! in_array($address, $usedAddresses)) {
-                    array_push($usedAddresses, $address);
-                }
-
-                $usedOutpointsCount++;
-
-                if (count($outPoints) == $usedOutpointsCount) {
-                    array_push($depletedAddresses, $address);
-                }
-            }
-        }
-
-        return [
-            'depletedAddresses'   => $depletedAddresses,
-            'inputs'              => $inputs,
-            'totalAmountGathered' => $totalAmountGathered,
-            'usedAddresses'       => $usedAddresses,
-        ];
-    }
-
-    private function doTransaction(
-        array $payload,
-        ?string $host = null
-    ): array {
-        // Re-implemented against POST /v1/transactions:create in Task 10.
-        throw new \RuntimeException('migrating to /v1 — see Task 10');
-    }
-
-    private function getDecryptedKeypair($address, $keypair): array
-    {
-        return [
-            'address' => $address,
-            'version' => null,
-            ...$this->decryptKeypair(
-                encryptedKey: $keypair['encryptedKey'],
-                nonce: $keypair['nonce']
-            ),
-        ];
+        throw new NotImplemented();
     }
 
     private function decryptKeypair(string $encryptedKey, string $nonce): array
     {
         try {
             return KeyHelpers::decryptKeypair(
-                encryptedKey: $encryptedKey,
+                save: $encryptedKey,
                 nonce: $nonce,
-                passPhrase: $this->getPassPhrase()
+                passphraseKey: $this->getPassPhrase()
             );
         } catch (Exception $e) {
             throw($e);
         }
-    }
-
-    private function getSignableAssetHash(array $asset): string
-    {
-        if (isset($asset['n']) && isset($asset['t_hash'])) {
-            return hash('sha3-256', KeyHelpers::getFormattedOutPointString($asset));
-        }
-
-        if (isset($asset['token'])) {
-            return hash('sha3-256', ("Token:{$asset['amount']}"));
-        }
-
-        if (isset($asset['amount'])) {
-            return hash('sha3-256', ("Item:{$asset['amount']}"));
-        }
-
-        return '';
     }
 }
