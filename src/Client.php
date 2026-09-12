@@ -544,12 +544,16 @@ class Client
      * A failure against one mailbox, or one mailbox entry, never discards
      * progress already made against the others: 'pending' and 'settled' are
      * accumulated across every mailbox regardless of errors elsewhere, and
-     * are always returned rather than the call throwing.
+     * are always returned rather than the call throwing. Every error
+     * encountered along the way is instead collected into the returned
+     * 'errors' list, mirroring sdk-go's Wallet.FetchPending2WayPayment
+     * (which joins them via errors.Join into its returned err) so a caller
+     * can still observe partial failures.
      *
      * @param array $storedPendingHalves The caller-persisted return values of prior make2WayPayment calls.
      * @param array<EncryptedKeypairDTO> $allKeypairs
      *
-     * @return array{pending:array<string,array>,settled:array<int,string>}
+     * @return array{pending:array<string,array>,settled:array<int,string>,errors:array<int,string>}
      */
     public function fetchPending2WayPayment(array $storedPendingHalves, array $allKeypairs): array
     {
@@ -562,6 +566,7 @@ class Client
 
         $pending = [];
         $settled = [];
+        $errors = [];
         $valenceClient = $this->getValenceClient();
 
         $seenMailbox = [];
@@ -578,6 +583,7 @@ class Client
             } catch (\Throwable $e) {
                 // This mailbox is unreachable; skip it and keep polling the
                 // rest rather than aborting discovery/settlement entirely.
+                $errors[] = "fetchPending2WayPayment: fetch valence mailbox \"{$mailboxAddress}\": {$e->getMessage()}";
                 continue;
             }
 
@@ -607,6 +613,7 @@ class Client
 
                     $this->submitTwoWayHalf($this->mempoolHost, $tx);
                 } catch (\Throwable $e) {
+                    $errors[] = "fetchPending2WayPayment: settle druid \"{$druid}\": {$e->getMessage()}";
                     continue;
                 }
 
@@ -616,6 +623,7 @@ class Client
                     // The half is already submitted on-chain even though
                     // the valence entry couldn't be cleaned up — this is
                     // committed progress and must still be reported settled.
+                    $errors[] = "fetchPending2WayPayment: delete settled valence entry for druid \"{$druid}\": {$e->getMessage()}";
                 }
 
                 $settled[] = $druid;
@@ -625,6 +633,7 @@ class Client
         return [
             'pending' => $pending,
             'settled' => $settled,
+            'errors' => $errors,
         ];
     }
 

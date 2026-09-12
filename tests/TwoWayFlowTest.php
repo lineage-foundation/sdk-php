@@ -346,6 +346,9 @@ class TwoWayFlowTest extends TestCase
         $this->assertSame($incomingOffer, $result['pending'][$incomingOfferDruid]);
 
         $this->assertCount(2, $this->lastHistory, 'both mailboxes must be attempted despite the second one failing');
+
+        $this->assertNotEmpty($result['errors'], 'the failed mailbox must be surfaced rather than silently swallowed');
+        $this->assertStringContainsString($rawKp2['address'], $result['errors'][0]);
     }
 
     /**
