@@ -79,4 +79,33 @@ class Serialization
             ],
         ];
     }
+
+    /**
+     * DruidExpectation: one leg of a two-way (DRUID) trade. Matches
+     * sdk-go's DruidExpectation / sdk-js's IDruidExpectation:
+     * {"from","to","asset"}.
+     */
+    public static function druidExpectation(string $from, string $to, array $asset): array
+    {
+        return [
+            'from' => $from,
+            'to' => $to,
+            'asset' => $asset,
+        ];
+    }
+
+    /**
+     * DruidInfo carries the DRUID (two-way trade) metadata attached to a
+     * transaction at construction time: {"druid","participants",
+     * "expectations"}. genesis_hash/fees are added downstream at submission
+     * time, not here.
+     */
+    public static function druidInfo(string $druid, int $participants, array $expectations): array
+    {
+        return [
+            'druid' => $druid,
+            'participants' => $participants,
+            'expectations' => $expectations,
+        ];
+    }
 }

@@ -42,6 +42,74 @@ class TxBuilder
         array $keyPairs,
         int $locktime
     ): array {
+        return self::createTxWithDruidInfo($paymentAddress, $asset, $excessAddress, $balance, $keyPairs, $locktime, null);
+    }
+
+    /**
+     * Build one half of a two-way (DRUID) trade: an ordinary P2PKH
+     * transaction that pays $counterExpectation['asset'] to
+     * $counterExpectation['to'] (plus any excess back to $excessAddress),
+     * carrying $thisExpectation as this party's half of the DRUID trade
+     * metadata.
+     *
+     * This replicates sdk-js's create2WTxHalf byte-for-byte: input
+     * selection and output/signature construction are exactly
+     * createPaymentTx's (driven by $counterExpectation's asset/to), and
+     * druid_info is attached as {druid, participants: 2,
+     * expectations: [$thisExpectation]} — UNSIGNED, and never folded into
+     * any signable preimage. Each input is signed exactly as in the 1-way
+     * path, over KeyHelpers::constructTxInOutSignableHash(previous_out,
+     * outputs).
+     *
+     * @param array $thisExpectation ['from'=>..,'to'=>..,'asset'=>..] — this
+     *   party's half of the trade, recorded in druid_info.
+     * @param array $counterExpectation ['from'=>..,'to'=>..,'asset'=>..] —
+     *   the counterparty's half; its asset/to drive the outputs of this
+     *   half exactly like createPaymentTx's $asset/$paymentAddress.
+     */
+    public static function create2WTxHalf(
+        string $druid,
+        array $thisExpectation,
+        array $counterExpectation,
+        array $balance,
+        array $keyPairs,
+        string $excessAddress,
+        int $locktime
+    ): array {
+        $druidInfo = Serialization::druidInfo($druid, 2, [
+            Serialization::druidExpectation(
+                $thisExpectation['from'],
+                $thisExpectation['to'],
+                $thisExpectation['asset']
+            ),
+        ]);
+
+        return self::createTxWithDruidInfo(
+            $counterExpectation['to'],
+            $counterExpectation['asset'],
+            $excessAddress,
+            $balance,
+            $keyPairs,
+            $locktime,
+            $druidInfo
+        );
+    }
+
+    /**
+     * The shared core of createPaymentTx and create2WTxHalf: gather inputs
+     * for $asset, build [payment, change] outputs, sign every input over
+     * the full output set, and stamp $druidInfo (null for an ordinary
+     * 1-way payment) onto the result.
+     */
+    private static function createTxWithDruidInfo(
+        string $paymentAddress,
+        array $asset,
+        string $excessAddress,
+        array $balance,
+        array $keyPairs,
+        int $locktime,
+        ?array $druidInfo
+    ): array {
         [$inputs, $totalGathered] = self::getInputsForTx($asset, $balance, $keyPairs);
 
         if (count($inputs) === 0) {
@@ -64,7 +132,7 @@ class TxBuilder
             'inputs' => $inputs,
             'outputs' => $outputs,
             'version' => self::NETWORK_VERSION,
-            'druid_info' => null,
+            'druid_info' => $druidInfo,
         ];
 
         return self::updateSignatures($tx, $balance, $keyPairs);

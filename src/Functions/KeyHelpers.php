@@ -282,9 +282,16 @@ class KeyHelpers
         ];
     }
 
+    /**
+     * Generate a DRUID (two-way trade correlation ID), matching sdk-js's
+     * generateDRUID exactly: "DRUID0x" followed by the first 32 hex
+     * characters of sha3-256(uuidv4 without dashes).
+     */
     public static function generateDRUID(): string
     {
-        return 'DRUID0x' . self::getPassPhraseHash(sodium_bin2hex(random_bytes(32)));
+        $uuid = str_replace('-', '', self::generateUuidV4());
+
+        return 'DRUID0x' . substr(hash('sha3-256', $uuid), 0, 32);
     }
 
     /**
@@ -337,5 +344,57 @@ class KeyHelpers
     public static function getFormattedOutPointString(array $outpoint): string
     {
         return "{$outpoint['n']}-{$outpoint['t_hash']}";
+    }
+
+    /**
+     * The "from" address used to correlate the two halves of a DRUID trade:
+     * hex(sha3_256(joined per-input P2PKH script strings)). Matches sdk-js's
+     * constructTxInsAddress / getFormattedScriptString byte-for-byte,
+     * including sdk-js's exact P2PKH stack layout (Bytes/Signature/PubKey/Op
+     * entries), even though this SDK does not otherwise construct or
+     * evaluate scripts.
+     *
+     * @param array $inputs CreateTxIn-shaped arrays:
+     *   {previous_out:{t_hash,n}|null, script_signature:{Pay2PkH:{signable_data,signature,public_key,address_version}}}.
+     */
+    public static function constructTxInsAddress(array $inputs): string
+    {
+        $parts = [];
+        foreach ($inputs as $input) {
+            $parts[] = self::formatTxInForAddress($input);
+        }
+
+        return hash('sha3-256', implode('-', $parts));
+    }
+
+    /**
+     * Formats a single input as sdk-js's constructTxInsAddress does:
+     * "{n}-{t_hash}-{p2pkh script string}" (or "null-{...}" when
+     * previous_out is absent).
+     */
+    private static function formatTxInForAddress(array $input): string
+    {
+        $sig = $input['script_signature']['Pay2PkH'];
+        $addressVersion = $sig['address_version'] ?? null;
+        $hashOp = ($addressVersion === null || $addressVersion === 1) ? 'OP_HASH256' : 'OP_HASH256_TEMP';
+        $address = self::constructAddress(hex2bin($sig['public_key']));
+
+        $script = implode('-', [
+            'Bytes:' . $sig['signable_data'],
+            'Signature:' . $sig['signature'],
+            'PubKey:' . $sig['public_key'],
+            'Op:OP_DUP',
+            'Op:' . $hashOp,
+            'Bytes:' . $address,
+            'Op:OP_EQUALVERIFY',
+            'Op:OP_CHECKSIG',
+        ]);
+
+        $prevOut = $input['previous_out'] ?? null;
+        if ($prevOut === null) {
+            return 'null-' . $script;
+        }
+
+        return self::getFormattedOutPointString($prevOut) . '-' . $script;
     }
 }
