@@ -12,6 +12,11 @@
             "Lineage\\": "src/"
         }
     },
+    "autoload-dev": {
+        "psr-4": {
+            "Lineage\\Tests\\": "tests/"
+        }
+    },
     "authors": [
         {
             "name": "Lineage Foundation",
@@ -21,11 +26,16 @@
     ],
     "require": {
         "php": "^8.2",
+        "ext-sodium": "*",
         "furqansiddiqui/bip39-mnemonic-php": "^0.1.7",
-        "guzzlehttp/guzzle": "^7.0"
+        "guzzlehttp/guzzle": "^8.2",
+        "bitwasp/bitcoin": "^0.0.35"
     },
     "support": {
         "source": "https://github.com/lineage-foundation/sdk-php",
         "issues": "https://github.com/lineage-foundation/sdk-php/issues"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^13.3"
     }
 }
