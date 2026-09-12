@@ -29,7 +29,7 @@
         "php": "^8.2",
         "ext-sodium": "*",
         "furqansiddiqui/bip39-mnemonic-php": "^0.1.7",
-        "guzzlehttp/guzzle": "^8.2",
+        "guzzlehttp/guzzle": "^7.8 || ^8.0",
         "simplito/elliptic-php": "^1.0"
     },
     "support": {

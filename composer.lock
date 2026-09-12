@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "6c0ac595ffae00dfd699a29f75482eb6",
+    "content-hash": "ae78d694817d8356f37ba493d83d7a61",
     "packages": [
         {
             "name": "furqansiddiqui/bip39-mnemonic-php",
