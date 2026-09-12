@@ -3,7 +3,6 @@
 namespace Lineage;
 
 use Exception;
-use GuzzleHttp\Client as HttpClient;
 use Lineage\DTO\DecryptedWalletDTO;
 use Lineage\DTO\DruidInfoDTO;
 use Lineage\DTO\EncryptedKeypairDTO;
@@ -30,14 +29,11 @@ class Client
 
     private ?DecryptedWalletDTO $walletDecrypted = null;
 
-    private HttpClient $http;
-
     public function __construct(
-        private string $computeHost,
-        private string $intercomHost,
+        private string $mempoolHost,
         private string $storageHost,
+        private ?string $apiKey = null,
     ) {
-        $this->http = new HttpClient();
     }
 
     /**
@@ -137,33 +133,106 @@ class Client
         );
     }
 
-    public function getBlockchainEntry(string $hash): array
+    /**
+     * Gets a single stored blockchain entry (a block or a transaction) by its
+     * raw storage key. Hits the storage host: GET /v1/blockchain-entries/{key}.
+     *
+     * @param string $key
+     *
+     * @return array
+     */
+    public function getBlockchainEntry(string $key): array
     {
-        try {
-            return $this->makeRequest(
-                apiRoute: self::ENDPOINT_GET_BLOCKCHAIN_ENTRY,
-                payload: $hash
-            );
-        } catch (\Exception $e) {
-            throw $e;
-        }
+        return $this->request(
+            method: self::GET,
+            host: $this->storageHost,
+            path: '/v1/blockchain-entries/' . rawurlencode($key),
+        );
     }
 
+    /**
+     * Batch-looks-up UTXO balances for the given addresses. Hits the mempool
+     * host: POST /v1/balances/query. Returns the `balance` breakdown (total
+     * asset amounts and per-address outpoints).
+     *
+     * @param array $addrs
+     *
+     * @return array
+     */
+    public function fetchBalance(array $addrs): array
+    {
+        $response = $this->request(
+            method: self::POST,
+            host: $this->mempoolHost,
+            path: '/v1/balances/query',
+            body: ['addresses' => $addrs],
+        );
+
+        return $response['balance'] ?? [];
+    }
 
     /**
-     * Fetches the balance for the opened wallet, using the addresses to keypairs supplied in $addressList.
+     * Gets the total and currently issued token supply. Hits the mempool
+     * host: GET /v1/supply.
      *
-     * @param array $addressList
-     *
-     * @return void
+     * @return array
      */
-    public function fetchBalance(array $addressList = []): array
+    public function getSupply(): array
     {
-        return $this->makeRequest(
-            apiRoute: self::ENDPOINT_FETCH_BALANCE,
-            payload: [
-                'address_list' => $addressList,
-            ]
+        return $this->request(
+            method: self::GET,
+            host: $this->mempoolHost,
+            path: '/v1/supply',
+        );
+    }
+
+    /**
+     * Gets a single stored block by number. Hits the storage host:
+     * GET /v1/blocks/{num}.
+     *
+     * @param int $num
+     *
+     * @return array
+     */
+    public function getBlock(int $num): array
+    {
+        return $this->request(
+            method: self::GET,
+            host: $this->storageHost,
+            path: '/v1/blocks/' . $num,
+        );
+    }
+
+    /**
+     * Gets the most recently stored block. Hits the storage host:
+     * GET /v1/blocks/latest.
+     *
+     * @return array
+     */
+    public function getLatestBlock(): array
+    {
+        return $this->request(
+            method: self::GET,
+            host: $this->storageHost,
+            path: '/v1/blocks/latest',
+        );
+    }
+
+    /**
+     * Batch-looks-up mempool status for the given transaction hashes. Hits
+     * the mempool host: POST /v1/transactions/status:query.
+     *
+     * @param array $hashes
+     *
+     * @return array
+     */
+    public function getTransactionStatus(array $hashes): array
+    {
+        return $this->request(
+            method: self::POST,
+            host: $this->mempoolHost,
+            path: '/v1/transactions/status:query',
+            body: ['hashes' => $hashes],
         );
     }
 
@@ -187,69 +256,20 @@ class Client
         bool $defaultHash,
         ?array $metaData = [],
     ): PaymentAssetDTO {
-        try {
-            $decryptedKeypair = $this->decryptKeypair(
-                encryptedKey: $encryptedKey,
-                nonce: $nonce
-            );
-
-            $address = hash('sha3-256', $decryptedKeypair['publicKey']);
-
-            $signableAssetHash = $this->getSignableAssetHash([
-                'amount' => $amount,
-            ]);
-
-            $signature = KeyHelpers::createSignature($signableAssetHash, $decryptedKeypair['secretKey']);
-
-            $metaDataStr = json_encode([
-                ...$metaData,
-                'name' => $name,
-            ]);
-
-            $payload = [
-                'item_amount'    => $amount,
-                'script_public_key' => $address,
-                'public_key'        => sodium_bin2hex($decryptedKeypair['publicKey']),
-                'signature'         => $signature,
-                'drs_tx_hash_spec'  => $defaultHash ? 'Default' : 'Create',
-                'metadata'          => $metaDataStr,
-                'version'           => null,
-            ];
-
-            $result = $this->makeRequest(
-                apiRoute: self::ENDPOINT_CREATE_ITEM_ASSET,
-                payload: $payload
-            );
-
-            return new PaymentAssetDTO(
-                amount: $amount,
-                drsTxHash: $result['asset']['asset'][PaymentAssetDTO::ASSET_TYPE_ITEM]['drs_tx_hash'],
-                metaData: json_decode($result['asset']['asset'][PaymentAssetDTO::ASSET_TYPE_ITEM]['metadata'], true)
-            );
-        } catch (Exception $e) {
-            throw $e;
-        }
+        // The legacy compute-node asset-creation path is gone under /v1.
+        // Re-implemented against POST /v1/transactions:create in Task 10.
+        throw new \RuntimeException('migrating to /v1 — see Task 10');
     }
 
     public function sendAssetToAddress(
         array $senderKeypairs,
         string $address,
         PaymentAssetDTO $asset,
-        string $excessAddress = null,
+        ?string $excessAddress = null,
     ): array {
-        try {
-            $payload = $this->makePaymentPayload(
-                myKeypairs: $senderKeypairs,
-                myAsset: $asset,
-                otherPartyAddress: $address,
-                excessAddress: $excessAddress
-            );
-
-            return $this->doTransaction([($payload['createTx'])->formatForAPI()]);
-        } catch (Exception $e) {
-            throw $e;
-        }
-
+        // The legacy compute-node payment path is gone under /v1.
+        // Re-implemented against POST /v1/transactions:create in Task 10.
+        throw new \RuntimeException('migrating to /v1 — see Task 10');
     }
 
     public function getPaymentAssetObject(
@@ -276,115 +296,20 @@ class Client
         // where to collect $myAsset from
         array $myKeypairs,
     ): array {
-        $myExpectation = new PaymentExpectationDTO(
-            to: $myAddress,
-            asset: $otherPartyAsset
-        );
-
-        $otherPartyExpectation = new PaymentExpectationDTO(
-            to: $otherPartyAddress,
-            asset: $myAsset
-        );
-
-        $druidInfo = new DruidInfoDTO(
-            expectations: [
-                $myExpectation->formatForAPI(),
-            ]
-        );
-
-        $payload = $this->makePaymentPayload(
-            myKeypairs: $myKeypairs,
-            myAsset: $myAsset,
-            otherPartyAddress: $otherPartyAddress,
-            excessAddress: $myAddress,
-            druidInfo: $druidInfo
-        );
-
-        $encryptedTransaction = KeyHelpers::encryptTransaction(
-            transaction: $payload['createTx']->formatForAPI(),
-            passPhrase: $this->getPassPhrase()
-        );
-
-        $otherPartyExpectation->setFrom(KeyHelpers::constructTransactionInputAddress($payload['createTx']->getInputs()));
-
-        $sendBody = IntercomUtils::generateIntercomSetBody(
-            addressKey: $otherPartyAddress,
-            addressField: $myAddress,
-            keyPairForField: $this->decryptKeypair(
-                encryptedKey: $myKeypairs[$myAddress]['encryptedKey'],
-                nonce: $myKeypairs[$myAddress]['nonce']
-            ),
-            value: [
-                'druid'               => $druidInfo->getDruid(),
-                'senderExpectation'   => $myExpectation->formatForAPI(),
-                'receiverExpectation' => $otherPartyExpectation->formatForAPI(),
-                'status'              => self::TRANSACTION_STATUS_PENDING,
-                'computeHost'         => $this->computeHost,
-            ]
-        );
-
-        $this->makeRequest(
-            apiRoute: self::ENDPOINT_SET_DATA,
-            payload: [$sendBody],
-        );
-
-        return $encryptedTransaction;
+        // The legacy intercom-based trade-request path is gone under /v1.
+        // Re-implemented against the /v1 transaction endpoints in Task 10.
+        throw new \RuntimeException('migrating to /v1 — see Task 10');
     }
 
     private function makePaymentPayload(
         array $myKeypairs,
         PaymentAssetDTO $myAsset,
         string $otherPartyAddress,
-        string $excessAddress = null,
-        DruidInfoDTO $druidInfo = null
+        ?string $excessAddress = null,
+        ?DruidInfoDTO $druidInfo = null
     ): array {
-        $balance = $this->fetchBalance(array_keys($myKeypairs));
-
-        $amountAvailable = (int) ($myAsset->getAssetType() === PaymentAssetDTO::ASSET_TYPE_TOKEN ?
-            $balance['total']['tokens'] : $balance['total']['items'][$myAsset->getDrsTxHash()] ?? 0);
-
-        if ($amountAvailable < $myAsset->getAmount()) {
-            throw new Exception('Insufficient funds');
-        }
-
-        $excessAddress = $excessAddress ?? array_keys($myKeypairs)[0];
-
-        $inputs = $this->getInputsForTransaction(
-            myKeypairs: $myKeypairs,
-            myBalance: $balance,
-            myAsset: $myAsset,
-        );
-
-        $totalAmountGathered = $inputs['totalAmountGathered'];
-
-        $outputs = [
-            (new TransactionOutputDTO(
-                scriptPublicKey: $otherPartyAddress,
-                paymentAsset: $myAsset
-            ))->formatForAPI(),
-        ];
-
-        $hasExcess = $totalAmountGathered > $myAsset->getAmount();
-
-        if ($hasExcess) {
-            $excessAsset = clone $myAsset;
-            $excessAsset->setAmount($totalAmountGathered - $myAsset->getAmount());
-
-            array_push($outputs, (new TransactionOutputDTO(
-                scriptPublicKey: $excessAddress,
-                paymentAsset: $excessAsset
-            ))->formatForAPI());
-        }
-
-        return [
-            'createTx' => (new TransactionDTO(
-                inputs: $inputs['inputs'],
-                outputs: $outputs,
-                druidInfo: $druidInfo
-            )),
-            'excessAddressUsed' => $hasExcess,
-            'usedAddresses'     => $inputs['usedAddresses'],
-        ];
+        // Re-implemented against the /v1 transaction endpoints in Task 10.
+        throw new \RuntimeException('migrating to /v1 — see Task 10');
     }
 
     //Not sure I agree with this - accepted transactions are processed in this function, as per the JS lib
@@ -392,106 +317,9 @@ class Client
         array $keypairs,
         ?array $encryptedTransactionMap = []
     ): array {
-        try {
-            $payload = [];
-
-            foreach ($keypairs as $address => $keypair) {
-                array_push($payload, IntercomUtils::generateIntercomGetBody(
-                    addressKey: $address,
-                    keyPairForField: $this->getDecryptedKeypair($address, $keypair)
-                ));
-            }
-
-            $transactions = $this->makeRequest(
-                apiRoute: self::ENDPOINT_GET_DATA,
-                payload: $payload,
-            );
-
-            $validTransactions = array_filter($transactions, fn($item) => IntercomUtils::isValidIntercomData($item['value']));
-
-            $transactionsByStatus = array_reduce($validTransactions, function (array $carry, array $item) {
-                if (isset($carry[$item['value']['status']])) {
-                    array_push($carry[$item['value']['status']], $item['value']);
-                }
-
-                return $carry;
-            }, [
-                self::TRANSACTION_STATUS_ACCEPTED => [],
-                self::TRANSACTION_STATUS_REJECTED => [],
-                self::TRANSACTION_STATUS_PENDING  => [],
-            ]);
-
-            $transactionsToDelete = [];
-
-            if ((bool) count($transactionsByStatus[self::TRANSACTION_STATUS_ACCEPTED])) {
-                $transactionsToSend = [];
-
-                foreach ($transactionsByStatus[self::TRANSACTION_STATUS_ACCEPTED] as $acceptedTransaction) {
-                    $encryptedTransaction = $encryptedTransactionMap[$acceptedTransaction['druid']];
-
-                    $decryptedTransaction = KeyHelpers::decryptTransaction(
-                        encryptedTransaction: $encryptedTransaction,
-                        passPhrase: $this->getPassPhrase()
-                    );
-
-                    if (!isset($decryptedTransaction['druid_info'])) {
-                        continue;
-                    }
-
-                    $decryptedTransaction['druid_info']['expectations'] = [
-                        $acceptedTransaction['senderExpectation'],
-                    ];
-
-                    array_push($transactionsToSend, $decryptedTransaction);
-                    array_push(
-                        $transactionsToDelete,
-                        $acceptedTransaction
-                    );
-                }
-
-                if (count($transactionsToSend)) {
-                    $result = $this->doTransaction(payload: $transactionsToSend);
-                }
-            }
-
-            if ((bool) count($transactionsByStatus[self::TRANSACTION_STATUS_REJECTED])) {
-                foreach ($transactionsByStatus[self::TRANSACTION_STATUS_REJECTED] as $rejectedTransaction) {
-                    array_push(
-                        $transactionsToDelete,
-                        $rejectedTransaction
-                    );
-                }
-            }
-
-            if(count($transactionsToDelete)) {
-                $formattedTransactionsToDelete = [];
-
-                foreach($transactionsToDelete as $transactionToDelete) {
-                    array_push(
-                        $formattedTransactionsToDelete,
-                        IntercomUtils::generateIntercomDeleteBody(
-                            addressKey: $transactionToDelete['receiverExpectation']['to'],
-                            addressField: $transactionToDelete['senderExpectation']['to'],
-                            keyPairForField: $this->getDecryptedKeypair(
-                                $transactionToDelete['senderExpectation']['to'],
-                                $keypairs[$transactionToDelete['receiverExpectation']['to']]
-                            )
-                        )
-                    );
-                }
-
-                $rs = $this->makeRequest(
-                    apiRoute: self::ENDPOINT_DELETE_DATA,
-                    payload: $formattedTransactionsToDelete,
-                );
-            }
-
-            return $transactionsByStatus[self::TRANSACTION_STATUS_PENDING];
-        } catch (\Exception $e) {
-            throw $e;
-        }
-
-        return $validTransactions;
+        // The legacy intercom get/accept/reject-data path is gone under /v1.
+        // Re-implemented against the /v1 transaction endpoints in Task 10.
+        throw new \RuntimeException('migrating to /v1 — see Task 10');
     }
 
     public function acceptPendingTransaction(
@@ -532,75 +360,9 @@ class Client
         string $druid,
         array $keypairs,
     ): array {
-        try {
-            $pendingTransactions = $this->getPendingTransactions($keypairs);
-            $pendingTransaction = reset($pendingTransactions);
-
-            if ($pendingTransaction['druid'] !== $druid) {
-                throw new Exception('Provided DRUID mismatch');
-            }
-
-            $pendingTransaction['status'] = $status;
-
-            $myExpectation = new PaymentExpectationDTO(
-                to: $pendingTransaction['receiverExpectation']['to'],
-                from: $pendingTransaction['receiverExpectation']['from'],
-                asset: new PaymentAssetDTO(
-                    amount: $this->getAmountAndHashFromExpectation($pendingTransaction['receiverExpectation'])['amount'],
-                    drsTxHash: $this->getAmountAndHashFromExpectation($pendingTransaction['receiverExpectation'])['hash']
-                )
-            );
-
-            $otherPartyExpectation = new PaymentExpectationDTO(
-                to: $pendingTransaction['senderExpectation']['to'],
-                asset: new PaymentAssetDTO(
-                    amount: $this->getAmountAndHashFromExpectation($pendingTransaction['senderExpectation'])['amount'],
-                    drsTxHash: $this->getAmountAndHashFromExpectation($pendingTransaction['senderExpectation'])['hash']
-                )
-            );
-
-            if ($status === self::TRANSACTION_STATUS_ACCEPTED) {
-                $druidInfo = new DruidInfoDTO(
-                    druid: $druid,
-                    expectations: [
-                        $myExpectation->formatForAPI(),
-                    ]
-                );
-
-                $payload = $this->makePaymentPayload(
-                    myKeypairs: $keypairs,
-                    myAsset: $otherPartyExpectation->getAsset(),
-                    otherPartyAddress: $otherPartyExpectation->getToAddress(),
-                    excessAddress: $myExpectation->getToAddress(),
-                    druidInfo: $druidInfo
-                );
-
-                $this->doTransaction(payload: [($payload['createTx'])->formatForAPI()], host: $pendingTransaction['computeHost']);
-
-                $otherPartyExpectation->setFrom(KeyHelpers::constructTransactionInputAddress($payload['createTx']->getInputs()));
-            }
-
-            $sendBody = IntercomUtils::generateIntercomSetBody(
-                addressKey: $otherPartyExpectation->getToAddress(),
-                addressField: $myExpectation->getToAddress(),
-                keyPairForField: $this->decryptKeypair(
-                    encryptedKey: $keypairs[$myExpectation->getToAddress()]['encryptedKey'],
-                    nonce: $keypairs[$myExpectation->getToAddress()]['nonce']
-                ),
-                value: [
-                    ...$pendingTransaction,
-                    "senderExpectation"   => $myExpectation->formatForAPI(),
-                    "receiverExpectation" => $otherPartyExpectation->formatForAPI(),
-                ]
-            );
-
-            return $this->makeRequest(
-                apiRoute: self::ENDPOINT_SET_DATA,
-                payload: [$sendBody],
-            );
-        } catch (Exception $e) {
-            throw $e;
-        }
+        // The legacy intercom accept/reject path is gone under /v1.
+        // Re-implemented against the /v1 transaction endpoints in Task 10.
+        throw new \RuntimeException('migrating to /v1 — see Task 10');
     }
 
     private function getInputsForTransaction(
@@ -673,13 +435,8 @@ class Client
         array $payload,
         ?string $host = null
     ): array {
-        $result = $this->makeRequest(
-            apiRoute: self::ENDPOINT_CREATE_TRANSACTIONS,
-            payload: $payload,
-            host: $host
-        );
-
-        return $result;
+        // Re-implemented against POST /v1/transactions:create in Task 10.
+        throw new \RuntimeException('migrating to /v1 — see Task 10');
     }
 
     private function getDecryptedKeypair($address, $keypair): array

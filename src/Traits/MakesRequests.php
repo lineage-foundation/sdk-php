@@ -4,211 +4,81 @@ declare(strict_types=1);
 
 namespace Lineage\Traits;
 
-use Exception;
-use Illuminate\Http\Response;
+use GuzzleHttp\Client as HttpClient;
+use Lineage\Exceptions\LineageApiException;
+use Lineage\Serialization;
 
+/**
+ * MakesRequests is the transport for the /v1 API: a thin, keyless JSON-over-HTTP
+ * request helper shared by every read/write method on Client.
+ */
 trait MakesRequests
 {
-    final public const POST = 'post';
+    final public const GET = 'GET';
 
-    final public const GET = 'get';
+    final public const POST = 'POST';
 
-    final public const SUCCESS = 'Success';
+    private ?HttpClient $httpClient = null;
 
-    final public const ERROR = 'Error';
-
-    final public const ENDPOINT_FETCH_BALANCE = 'fetch_balance';
-
-    final public const ENDPOINT_CREATE_ITEM_ASSET = 'create_item_asset';
-
-    final public const ENDPOINT_CREATE_TRANSACTIONS = 'create_transactions';
-
-    final public const ENDPOINT_GET_BLOCKCHAIN_ENTRY = 'blockchain_entry';
-
-    final public const ENDPOINT_SET_DATA = 'set_data';
-
-    final public const ENDPOINT_GET_DATA = 'get_data';
-
-    final public const ENDPOINT_DELETE_DATA = 'del_data';
-
-    final public const COMPUTE_ENDPOINTS = [
-        self::ENDPOINT_FETCH_BALANCE => [
-            'difficulty'    => 0,
-            'requestMethod' => self::POST,
-        ],
-        self::ENDPOINT_CREATE_ITEM_ASSET => [
-            'difficulty'    => 0,
-            'requestMethod' => self::POST,
-        ],
-        self::ENDPOINT_CREATE_TRANSACTIONS => [
-            'difficulty'    => 4,
-            'requestMethod' => self::POST,
-        ],
-    ];
-
-    final public const INTERCOM_ENDPOINTS = [
-        self::ENDPOINT_SET_DATA => [
-            'requestMethod' => self::POST,
-        ],
-        self::ENDPOINT_GET_DATA => [
-            'requestMethod' => self::POST,
-        ],
-        self::ENDPOINT_DELETE_DATA => [
-            'requestMethod' => self::POST,
-        ]
-    ];
-
-    final public const STORAGE_ENDPOINTS = [
-        self::ENDPOINT_GET_BLOCKCHAIN_ENTRY => [
-            'difficulty'    => 3,
-            'requestMethod' => self::POST,
-        ]
-    ];
-
-    public function makeRequest(
-        string $apiRoute,
-        array|string $payload,
-        ?string $host = null
-    ): array {
-        try {
-            if (array_key_exists($apiRoute, self::COMPUTE_ENDPOINTS)) {
-                return $this->makeComputeRequest(
-                    apiRoute: $apiRoute,
-                    requestMethod: self::COMPUTE_ENDPOINTS[$apiRoute]['requestMethod'],
-                    difficulty: self::COMPUTE_ENDPOINTS[$apiRoute]['difficulty'],
-                    payload: $payload,
-                    host: $host
-                );
-            } elseif (array_key_exists($apiRoute, self::INTERCOM_ENDPOINTS)) {
-                return $this->makeIntercomRequest(
-                    apiRoute: $apiRoute,
-                    requestMethod: self::INTERCOM_ENDPOINTS[$apiRoute]['requestMethod'],
-                    payload: $payload
-                );
-            } elseif (array_key_exists($apiRoute, self::STORAGE_ENDPOINTS)) {
-                return $this->makeStorageRequest(
-                    apiRoute: $apiRoute,
-                    difficulty: self::STORAGE_ENDPOINTS[$apiRoute]['difficulty'],
-                    requestMethod: self::STORAGE_ENDPOINTS[$apiRoute]['requestMethod'],
-                    payload: $payload
-                );
-            }
-        } catch (Exception $e) {
-            throw $e;
-        }
-    }
-
-    private function makeComputeRequest(
-        string $apiRoute,
-        string $requestMethod,
-        array $payload,
-        int $difficulty = 4,
-        ?string $host = null
-    ): array {
-        $requestId = substr(sodium_bin2hex(random_bytes(32)), 0, 32);
-        $nonce = $this->getNonce($requestId, $difficulty);
-
-        $finalHost = $host ?? $this->computeHost;
-
-        try {
-            $response = $this->http->request(
-                $requestMethod,
-                $finalHost . '/' . $apiRoute,
-                [
-                    'headers' => [
-                        'x-cache-id' => $requestId,
-                        'x-nonce'      => $nonce,
-                    ],
-                    'json' => $payload
-                ]
-            );
-
-            if($response->getStatusCode() === Response::HTTP_OK) {
-                $jsonResponse = json_decode($response->getBody()->getContents(), true);
-
-                if ($jsonResponse['status'] === self::ERROR) {
-                    throw new Exception($result['reason']);
-                }
-
-                return $jsonResponse['content'];
-            }
-
-            throw new Exception('An unexpected API error has occurred');
-        } catch (Exception $e) {
-            throw $e;
-        }
-    }
-
-    public function makeIntercomRequest(
-        string $apiRoute,
-        string $requestMethod,
-        array $payload,
-    ): array {
-        try {
-            $response = $this->http->request(
-                $requestMethod,
-                $this->intercomHost . '/' . $apiRoute,
-                [
-                    'json' => $payload
-                ]
-            );
-
-            if ($response->getStatusCode() === Response::HTTP_OK) {
-                $text = $response->getBody()->getContents();
-                $contents = json_decode($text, true);
-                return $contents ?? [$text];
-            }
-
-            throw new Exception('An error has occurred');
-        } catch (Exception $e) {
-            throw new Exception($e->getMessage());
-        }
-    }
-
-    public function makeStorageRequest(
-        string $apiRoute,
-        string $requestMethod,
-        string $payload,
-        int $difficulty = 4,
-    ): array {
-        $requestId = substr(sodium_bin2hex(random_bytes(32)), 0, 32);
-        $nonce = $this->getNonce($requestId, $difficulty);
-
-        try {
-            $response = $this->http->request(
-                $requestMethod,
-                $this->storageHost . '/' . $apiRoute,
-                [
-                    'headers' => [
-                        'x-cache-id' => $requestId,
-                        'x-nonce'      => $nonce,
-                    ],
-                    'json' => $payload
-                ]
-            );
-
-            if ($response->getStatusCode() === Response::HTTP_OK) {
-                $text = $response->getBody()->getContents();
-                $contents = json_decode($text, true);
-                return $contents ?? [$text];
-            }
-            throw new Exception('An error has occurred');
-        } catch (Exception $e) {
-            throw new Exception($e->getMessage());
-        }
-    }
-
-    private function getNonce(string $id, int $target): int
+    /**
+     * Inject a Guzzle client (e.g. one built on top of a MockHandler stack)
+     * in place of the lazily-created default. Intended for tests.
+     */
+    public function setHttpClient(HttpClient $httpClient): void
     {
-        $nonce = 0;
-        $hash = hash('sha3-256', "$nonce-$id");
-        $testStr = str_repeat('0', $target);
+        $this->httpClient = $httpClient;
+    }
 
-        while (substr($hash, 0, $target) !== $testStr) {
-            $nonce++;
-            $hash = hash('sha3-256', "$nonce-$id");
+    private function getHttpClient(): HttpClient
+    {
+        if ($this->httpClient === null) {
+            $this->httpClient = new HttpClient();
         }
 
-        return $nonce;
+        return $this->httpClient;
+    }
+
+    /**
+     * Issue a request against $host . $path on the /v1 API.
+     *
+     * When $body is non-null it is JSON-encoded (byte-identical to sdk-js's
+     * JSON.stringify, via Serialization::json) as the request body and
+     * Content-Type is set to application/json. The x-api-key header is sent
+     * when the client was configured with an API key.
+     *
+     * On a non-2xx response, the body is decoded as application/problem+json
+     * and thrown as a LineageApiException. On 2xx, the JSON response body is
+     * decoded and returned.
+     */
+    private function request(string $method, string $host, string $path, ?array $body = null): array
+    {
+        $headers = [];
+
+        if (!empty($this->apiKey)) {
+            $headers['x-api-key'] = $this->apiKey;
+        }
+
+        $options = [
+            'headers' => $headers,
+            'http_errors' => false,
+        ];
+
+        if ($body !== null) {
+            $headers['Content-Type'] = 'application/json';
+            $options['headers'] = $headers;
+            $options['body'] = Serialization::json($body);
+        }
+
+        $response = $this->getHttpClient()->request($method, $host . $path, $options);
+
+        $status = $response->getStatusCode();
+        $contents = $response->getBody()->getContents();
+        $decoded = $contents !== '' ? json_decode($contents, true) : [];
+
+        if ($status < 200 || $status >= 300) {
+            throw LineageApiException::fromResponseBody(is_array($decoded) ? $decoded : [], $status);
+        }
+
+        return is_array($decoded) ? $decoded : [];
     }
 }
