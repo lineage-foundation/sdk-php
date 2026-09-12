@@ -338,46 +338,4 @@ class KeyHelpers
     {
         return "{$outpoint['n']}-{$outpoint['t_hash']}";
     }
-
-    private static function getPayToPublicKeyHashScript(
-        string $checkData,
-        string $signatureData,
-        string $publicKeyData,
-        int $addressVersion = null
-    ): array {
-        return  [
-            [
-                'type'  => 'Bytes',
-                'value' => $checkData,
-            ],
-            [
-                'type'  => 'Signature',
-                'value' => $signatureData,
-            ],
-            [
-                'type'  => 'PubKey',
-                'value' => $publicKeyData,
-            ],
-            [
-                'type'  => 'Op',
-                'value' => 'OP_DUP',
-            ],
-            [
-                'type'  => 'Op',
-                'value' => 'OP_HASH256',
-            ],
-            [
-                'type'  => 'Bytes',
-                'value' => self::constructAddress(sodium_hex2bin($publicKeyData)),
-            ],
-            [
-                'type'  => 'Op',
-                'value' => 'OP_EQUALVERIFY',
-            ],
-            [
-                'type'  => 'Op',
-                'value' => 'OP_CHECKSIG',
-            ],
-        ];
-    }
 }

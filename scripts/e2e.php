@@ -173,6 +173,12 @@ if (getenv('LINEAGE_E2E_FUND') === '1') {
     );
 
     if ($genesisHash !== null) {
+        pollUntil('sender item UTXO confirmed', function () use ($client, $senderKeypair) {
+            $balance = $client->fetchBalance([$senderKeypair->getAddress()]);
+
+            return count($balance['items'] ?? []) > 0;
+        });
+
         step(
             'makeItemPayment',
             fn () => $client->makeItemPayment(
