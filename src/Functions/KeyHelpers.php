@@ -168,9 +168,9 @@ class KeyHelpers
         return self::constructAddress($signableTxIns);
     }
 
-    private static function constructAddress(string $address): string
+    public static function constructAddress(string $publicKeyBytes): string
     {
-        return hash('sha3-256', $address);
+        return hash('sha3-256', $publicKeyBytes);
     }
 
     public static function getFormattedOutPointString(array $outpoint): string
