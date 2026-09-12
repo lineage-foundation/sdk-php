@@ -147,6 +147,21 @@ $client->accept2WayPayment($details, $allKeypairs);
 $client->reject2WayPayment($details, $allKeypairs);
 ```
 
+`make2WayPayment` is stateless on this side: it builds and encrypts this party's
+transaction half, posts the plaintext offer to valence, and hands the pending half
+back to the caller — it does not keep it anywhere itself. The caller must persist that
+return value (e.g. to disk, a database) and pass it back in as one of
+`$storedPendingHalves` on a later `fetchPending2WayPayment` call, which is what
+actually submits and settles it once the counterparty has accepted.
+
+Because the plaintext valence protocol, the DRUID expectation shapes, and the
+transaction halves are all wire-identical across SDKs, a trade offered by this SDK's
+`make2WayPayment` can be discovered and accepted by
+[`sdk-js`](https://github.com/lineage-foundation/sdk-js)'s or
+[`sdk-go`](https://github.com/lineage-foundation/sdk-go)'s `fetchPending2WayPayment`/
+`accept2WayPayment` (and vice versa) — neither side needs to know which SDK the other
+party is running.
+
 ## Wire compatibility with sdk-js
 
 This SDK is built to be byte-for-byte compatible with
@@ -190,6 +205,21 @@ By default it only runs the read methods (`getSupply`, `getLatestBlock`, `getBlo
 `makeTokenPayment` and `makeItemPayment` against the live network. This live e2e is
 intentionally kept out of the default CI workflow (`.github/workflows/ci.yml`), which
 only runs the vector-backed unit test suite.
+
+`scripts/e2e-2way.php` drives a full two-wallet 2-way (DRUID) swap against the same
+live hosts plus `valence.lineage.to`: wallet A mints an item and offers it in exchange
+for tokens from wallet B, B accepts, A settles, and both final balances are polled to
+confirm the swap landed atomically.
+
+```
+php scripts/e2e-2way.php                    # local wallet/keypair setup only
+LINEAGE_E2E_WRITE=1 php scripts/e2e-2way.php   # + miner funding and the live swap
+```
+
+As with `e2e.php`, wallet/keypair creation is a local operation and always runs;
+`LINEAGE_E2E_WRITE=1` additionally funds both wallets from the miner faucet and drives
+`make2WayPayment` / `fetchPending2WayPayment` / `accept2WayPayment` against the live
+network. It is likewise excluded from the default CI workflow.
 
 ## Links
 
