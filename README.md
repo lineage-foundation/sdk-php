@@ -27,6 +27,10 @@ composer require lineage/php
 
 An optional **`apiKey`** is sent as the `x-api-key` header on every request, if set.
 
+An optional **`valenceHost`** is the plaintext mailbox relay 2-way payments
+(`make2WayPayment`/`fetchPending2WayPayment`/`accept2WayPayment`/`reject2WayPayment`)
+exchange DRUID trade offers through; it's only required if you use those methods.
+
 ```php
 use Lineage\Client;
 
@@ -34,6 +38,7 @@ $client = new Client(
     mempoolHost: 'https://mempool.lineage.to',
     storageHost: 'https://storage.lineage.to',
     apiKey: 'your-api-key', // optional
+    valenceHost: 'https://valence.lineage.to', // optional, required for 2-way payments
 );
 ```
 
@@ -119,12 +124,28 @@ $client->makeItemPayment($paymentAddress, $amount, $genesisHash, $allKeypairs, $
 `$allKeypairs` is an array of `EncryptedKeypairDTO`s whose combined balance funds the
 payment; `$excessKeypair` receives the change output.
 
-### 2-way payments (deferred)
+### 2-way payments
 
-`createTradeRequest`, `getPendingTransactions`, `acceptPendingTransaction` and
-`rejectPendingTransaction` (DRUID-based dual double-entry trades) are **not yet
-implemented** against `/v1` — each throws `Lineage\Exceptions\NotImplemented` until the
-corresponding `/v1` endpoints land.
+DRUID-based dual double-entry trades: two parties each pay an asset to the other,
+atomically correlated by a shared DRUID, and coordinated out-of-band through a
+plaintext valence mailbox host (`valenceHost`, see Configuration above).
+
+```php
+// Party A offers to pay $sendingAsset to $paymentAddress in exchange for
+// $receivingAsset delivered to $receiveKeypair's address. Persist the
+// returned pending half until fetchPending2WayPayment reports it settled.
+$pendingHalf = $client->make2WayPayment($paymentAddress, $sendingAsset, $receivingAsset, $allKeypairs, $receiveKeypair);
+
+// Both parties poll their own mailboxes: incoming offers are surfaced as
+// 'pending'; offers this wallet made that the counterparty has accepted are
+// submitted and reported as 'settled'.
+['pending' => $pending, 'settled' => $settled] = $client->fetchPending2WayPayment($storedPendingHalves, $allKeypairs);
+
+// Party B accepts (submits its half and notifies valence) or rejects
+// (notifies valence only) an offer found in $pending.
+$client->accept2WayPayment($details, $allKeypairs);
+$client->reject2WayPayment($details, $allKeypairs);
+```
 
 ## Wire compatibility with sdk-js
 

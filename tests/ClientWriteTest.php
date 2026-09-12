@@ -11,8 +11,6 @@ use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
 use Lineage\Client;
 use Lineage\DTO\EncryptedKeypairDTO;
-use Lineage\DTO\PaymentAssetDTO;
-use Lineage\Exceptions\NotImplemented;
 use Lineage\Functions\KeyHelpers;
 use Lineage\Serialization;
 use PHPUnit\Framework\TestCase;
@@ -171,52 +169,6 @@ class ClientWriteTest extends TestCase
         $wantBody = Serialization::json(['transactions' => [$expectedTx]]);
 
         $this->assertSame($wantBody, (string) $txRequest->getBody());
-    }
-
-    public function testCreateTradeRequestThrowsNotImplemented(): void
-    {
-        $client = new Client(self::MEMPOOL_HOST, self::STORAGE_HOST, self::API_KEY);
-
-        $this->expectException(NotImplemented::class);
-        $this->expectExceptionMessage('2-way payments deferred');
-
-        $client->createTradeRequest(
-            'other-party-address',
-            new PaymentAssetDTO(100),
-            'my-address',
-            new PaymentAssetDTO(100),
-            []
-        );
-    }
-
-    public function testGetPendingTransactionsThrowsNotImplemented(): void
-    {
-        $client = new Client(self::MEMPOOL_HOST, self::STORAGE_HOST, self::API_KEY);
-
-        $this->expectException(NotImplemented::class);
-        $this->expectExceptionMessage('2-way payments deferred');
-
-        $client->getPendingTransactions([]);
-    }
-
-    public function testAcceptPendingTransactionThrowsNotImplemented(): void
-    {
-        $client = new Client(self::MEMPOOL_HOST, self::STORAGE_HOST, self::API_KEY);
-
-        $this->expectException(NotImplemented::class);
-        $this->expectExceptionMessage('2-way payments deferred');
-
-        $client->acceptPendingTransaction('druid', []);
-    }
-
-    public function testRejectPendingTransactionThrowsNotImplemented(): void
-    {
-        $client = new Client(self::MEMPOOL_HOST, self::STORAGE_HOST, self::API_KEY);
-
-        $this->expectException(NotImplemented::class);
-        $this->expectExceptionMessage('2-way payments deferred');
-
-        $client->rejectPendingTransaction('druid', []);
     }
 
     /**
