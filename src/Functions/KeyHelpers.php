@@ -4,9 +4,20 @@ namespace Lineage\Functions;
 
 use FurqanSiddiqui\BIP39\BIP39;
 use Lineage\Exceptions\KeypairNotDecryptedException;
+use Lineage\Serialization;
 
 class KeyHelpers
 {
+    /**
+     * The BIP39 passphrase every keypair derivation uses. sdk-js's
+     * generateMasterKey/mgmtClient.initNew et al. never pass a BIP39
+     * passphrase (it defaults to ''); the wallet's own passphrase only ever
+     * encrypts the keystore (mnemonic and individual keypairs) at rest, via
+     * passphraseKey(). Fixing this avoids conflating the two and matches
+     * sdk-go's bip39Passphrase constant.
+     */
+    private const BIP39_PASSPHRASE = '';
+
     /**
      * Returns array with seed phrase, nonce, save
      */
@@ -54,42 +65,71 @@ class KeyHelpers
         ];
     }
 
-    public static function getNewKeypair(string $masterPrivateKey, string $passPhrase, array $existingAddresses = []): array
+    /**
+     * Derive the ed25519 keypair (and address) at the given hardened BIP32 index.
+     *
+     * The ed25519 seed is the first 32 bytes of the ASCII xprv Base58Check
+     * string of the derived child key (matches sdk-js).
+     *
+     * @return array{publicKey:string,secretKey:string,address:string}
+     */
+    public static function deriveKeypair(string $mnemonic, string $passphrase, int $index): array
     {
-        $counter = count($existingAddresses);
+        $master = Bip32::masterXprv(Bip32::mnemonicToSeed($mnemonic, $passphrase));
+        $childXprv = Bip32::childXprv($master, $index);
+        $edSeed = substr($childXprv, 0, SODIUM_CRYPTO_SIGN_SEEDBYTES);
+
+        $keypair = self::keypairFromSeed($edSeed);
+        $keypair['address'] = self::constructAddress($keypair['publicKey']);
+
+        return $keypair;
+    }
+
+    /**
+     * Derive and encrypt the next unused keypair: starting at
+     * index = count($existingAddresses), derive keypairs at increasing
+     * indices until one whose address isn't already in $existingAddresses is
+     * found, matching sdk-js's generateNewKeypairAndAddress / sdk-go's
+     * GetNewKeypair. $passphraseKey must already be a derived secretbox key
+     * (e.g. from passphraseKey()), not a raw passphrase — the returned
+     * nonce/save are produced by encryptKeypair(), so the result decrypts
+     * via decryptKeypair() with that same $passphraseKey.
+     */
+    public static function getNewKeypair(string $mnemonic, string $passphraseKey, array $existingAddresses = []): array
+    {
+        $index = count($existingAddresses);
 
         do {
-            $seedKey = self::generateMasterKey($masterPrivateKey, $passPhrase, $counter);
+            $keypair = self::deriveKeypair($mnemonic, self::BIP39_PASSPHRASE, $index);
+            $address = $keypair['address'];
+            $index++;
+        } while (in_array($address, $existingAddresses, true));
 
-            $keypairRaw = sodium_crypto_sign_seed_keypair(substr($seedKey, 0, SODIUM_CRYPTO_SIGN_SEEDBYTES));
-            $publicKey = sodium_crypto_sign_publickey($keypairRaw);
-            $address = self::constructAddress($publicKey);
-            $counter++;
-        } while (in_array($address, $existingAddresses));
-
-        $privateKey = sodium_crypto_sign_secretkey($keypairRaw);
-        $nonce = self::getNonce();
-
-        $save = sodium_crypto_secretbox($publicKey . $privateKey, $nonce, $passPhrase);
+        $encrypted = self::encryptKeypair($keypair['publicKey'], $keypair['secretKey'], $passphraseKey);
 
         return [
             'address' => $address,
-            'nonce'   => sodium_bin2hex($nonce),
-            'save'    => sodium_bin2base64($save, SODIUM_BASE64_VARIANT_ORIGINAL),
+            'nonce'   => $encrypted['nonce'],
+            'save'    => $encrypted['save'],
         ];
     }
 
+    /**
+     * Decrypt a keystore record produced by encryptKeypair (or the sdk-js
+     * equivalent). The nonce is used as-is: sdk-js stores the first 24 raw
+     * characters of a v4 UUID as the secretbox nonce, so it is NOT hex or
+     * base64 decoded here.
+     */
     public static function decryptKeypair(
-        string $encryptedKey,
+        string $save,
         string $nonce,
-        string $passPhrase
+        string $passphraseKey
     ): array {
-        $encryptedKeyPair = sodium_base642bin($encryptedKey, SODIUM_BASE64_VARIANT_ORIGINAL);
-        $nonce = sodium_hex2bin($nonce);
+        $encryptedKeyPair = sodium_base642bin($save, SODIUM_BASE64_VARIANT_ORIGINAL);
 
-        $decrypted = sodium_crypto_secretbox_open($encryptedKeyPair, $nonce, $passPhrase);
+        $decrypted = sodium_crypto_secretbox_open($encryptedKeyPair, $nonce, $passphraseKey);
 
-        if (!$decrypted) {
+        if ($decrypted === false) {
             throw new KeypairNotDecryptedException();
         }
 
@@ -97,6 +137,88 @@ class KeyHelpers
             'publicKey' => substr($decrypted, 0, SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES),
             'secretKey' => substr($decrypted, SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES, SODIUM_CRYPTO_SIGN_SECRETKEYBYTES),
         ];
+    }
+
+    /**
+     * Encrypt a keypair for storage, matching sdk-js's keystore record shape:
+     * plaintext = publicKey(32) . secretKey(64), sealed with
+     * sodium_crypto_secretbox under the passphraseKey, using a nonce that is
+     * the first 24 raw bytes of a v4 UUID string.
+     *
+     * @return array{nonce:string,save:string}
+     */
+    public static function encryptKeypair(
+        string $publicKey,
+        string $secretKey,
+        string $passphraseKey,
+        ?string $nonce = null
+    ): array {
+        $nonce ??= substr(self::generateUuidV4(), 0, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+
+        $save = sodium_crypto_secretbox($publicKey . $secretKey, $nonce, $passphraseKey);
+
+        return [
+            'nonce' => $nonce,
+            'save'  => sodium_bin2base64($save, SODIUM_BASE64_VARIANT_ORIGINAL),
+        ];
+    }
+
+    /**
+     * Seal an arbitrary string under a passphrase-derived key, matching
+     * sdk-go's sealMnemonic: sodium_crypto_secretbox with a fresh
+     * v4-UUID-derived nonce (same convention as encryptKeypair). Used by
+     * Client::createWallet to seal the wallet's BIP39 mnemonic — this SDK
+     * derives every keypair directly from the mnemonic (see getNewKeypair),
+     * so the mnemonic itself, not a separate BIP32 master key, is the
+     * reconstructable wallet state.
+     *
+     * @return array{nonce:string,save:string}
+     */
+    public static function encryptMnemonic(string $mnemonic, string $passphraseKey, ?string $nonce = null): array
+    {
+        $nonce ??= substr(self::generateUuidV4(), 0, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+
+        $save = sodium_crypto_secretbox($mnemonic, $nonce, $passphraseKey);
+
+        return [
+            'nonce' => $nonce,
+            'save'  => sodium_bin2base64($save, SODIUM_BASE64_VARIANT_ORIGINAL),
+        ];
+    }
+
+    /**
+     * Open a mnemonic sealed by encryptMnemonic (or sdk-go's sealMnemonic).
+     */
+    public static function decryptMnemonic(string $save, string $nonce, string $passphraseKey): string
+    {
+        $decrypted = sodium_crypto_secretbox_open(
+            sodium_base642bin($save, SODIUM_BASE64_VARIANT_ORIGINAL),
+            $nonce,
+            $passphraseKey
+        );
+
+        if ($decrypted === false) {
+            throw new KeypairNotDecryptedException();
+        }
+
+        return $decrypted;
+    }
+
+    private static function generateUuidV4(): string
+    {
+        $bytes = random_bytes(16);
+        $bytes[6] = chr((ord($bytes[6]) & 0x0f) | 0x40);
+        $bytes[8] = chr((ord($bytes[8]) & 0x3f) | 0x80);
+        $hex = bin2hex($bytes);
+
+        return sprintf(
+            '%s-%s-%s-%s-%s',
+            substr($hex, 0, 8),
+            substr($hex, 8, 4),
+            substr($hex, 12, 4),
+            substr($hex, 16, 4),
+            substr($hex, 20, 12)
+        );
     }
 
     public static function encryptTransaction(array $transaction, string $passPhrase): array
@@ -126,12 +248,22 @@ class KeyHelpers
         return json_decode($decryptedTransaction, true);
     }
 
-    public static function getPassPhraseHash(string $passPhrase): string
+    /**
+     * Derive the secretbox key from a passphrase, matching sdk-js's
+     * getPassphraseBuffer: the ASCII of the first 32 hex characters of the
+     * sha3-256 digest (NOT the raw digest bytes).
+     */
+    public static function passphraseKey(string $passphrase): string
     {
-        return substr(hash('sha3-256', $passPhrase), 0, SODIUM_CRYPTO_SECRETBOX_KEYBYTES);
+        return substr(hash('sha3-256', $passphrase), 0, SODIUM_CRYPTO_SECRETBOX_KEYBYTES);
     }
 
-    private static function generateSeed(int $length = 12): string
+    public static function getPassPhraseHash(string $passPhrase): string
+    {
+        return self::passphraseKey($passPhrase);
+    }
+
+    public static function generateSeed(int $length = 12): string
     {
         return implode(' ', BIP39::Generate($length)->words);
     }
@@ -141,82 +273,69 @@ class KeyHelpers
         return sodium_bin2hex(sodium_crypto_sign_detached($message, $secretKey));
     }
 
+    public static function keypairFromSeed(string $seed32): array
+    {
+        $raw = sodium_crypto_sign_seed_keypair($seed32);
+        return [
+            'publicKey' => sodium_crypto_sign_publickey($raw),
+            'secretKey' => sodium_crypto_sign_secretkey($raw),
+        ];
+    }
+
     public static function generateDRUID(): string
     {
         return 'DRUID0x' . self::getPassPhraseHash(sodium_bin2hex(random_bytes(32)));
     }
 
-    public static function constructTransactionInputAddress(array $inputs): string
+    /**
+     * The /v1 transaction input signable hash: sha3-256 of the concatenated
+     * compact-JSON encoding of each of this input's consuming tx_outs
+     * followed by the compact-JSON encoding of the previous out-point being
+     * spent (or "null" if there is none). Matches sdk-go/sdk-js exactly —
+     * see sdk-go/tx.go's constructTxInOutSignableHash.
+     *
+     * @param array|null $prevOut
+     * @param array $txOuts
+     */
+    public static function constructTxInOutSignableHash(?array $prevOut, array $txOuts): string
     {
-        $signableTxIns = implode('-', array_map(function ($input) {
-            $scriptSignature = $input['script_signature']['Pay2PkH'];
-            $previousOutPoint = $input['previous_out'];
+        $preimage = '';
+        foreach ($txOuts as $txOut) {
+            $preimage .= Serialization::json($txOut);
+        }
+        $preimage .= Serialization::json($prevOut);
 
-            $scriptStack = self::getPayToPublicKeyHashScript(
-                checkData: $scriptSignature['signable_data'],
-                signatureData: $scriptSignature['signature'],
-                publicKeyData: $scriptSignature['public_key'],
-                addressVersion: $scriptSignature['address_version']
-            );
-
-            $formattedScriptString = implode('-', array_map(fn($item) => "{$item['type']}:{$item['value']}", $scriptStack));
-            $previousOutpointStr = $previousOutPoint ? self::getFormattedOutPointString($previousOutPoint) : 'null';
-
-            return "$previousOutpointStr-$formattedScriptString";
-        }, $inputs));
-
-        return self::constructAddress($signableTxIns);
+        return hash('sha3-256', $preimage);
     }
 
-    private static function constructAddress(string $address): string
+    /**
+     * Sign a signable hash. CRITICAL: signs the UTF-8 bytes of the 64-char
+     * hex string representation of the hash, not the raw digest bytes —
+     * this must match sdk-js's behaviour exactly.
+     */
+    public static function constructSignature(string $signableHashHex, string $secretKey): string
     {
-        return hash('sha3-256', $address);
+        return sodium_bin2hex(sodium_crypto_sign_detached($signableHashHex, $secretKey));
+    }
+
+    /**
+     * The signable hash of an Item/Token asset (used e.g. for genesis
+     * hashes): sha3-256 of "Token:<amount>" or "Item:<amount>".
+     */
+    public static function constructItemAssetSignableHash(array $asset): string
+    {
+        $preimage = isset($asset['Token']) ? 'Token:' . $asset['Token'] : 'Item:' . $asset['Item']['amount'];
+
+        return hash('sha3-256', $preimage);
+    }
+
+    public static function constructAddress(string $publicKeyBytes): string
+    {
+        return hash('sha3-256', $publicKeyBytes);
     }
 
     public static function getFormattedOutPointString(array $outpoint): string
     {
         return "{$outpoint['n']}-{$outpoint['t_hash']}";
-    }
-
-    private static function getPayToPublicKeyHashScript(
-        string $checkData,
-        string $signatureData,
-        string $publicKeyData,
-        int $addressVersion = null
-    ): array {
-        return  [
-            [
-                'type'  => 'Bytes',
-                'value' => $checkData,
-            ],
-            [
-                'type'  => 'Signature',
-                'value' => $signatureData,
-            ],
-            [
-                'type'  => 'PubKey',
-                'value' => $publicKeyData,
-            ],
-            [
-                'type'  => 'Op',
-                'value' => 'OP_DUP',
-            ],
-            [
-                'type'  => 'Op',
-                'value' => 'OP_HASH256',
-            ],
-            [
-                'type'  => 'Bytes',
-                'value' => self::constructAddress(sodium_hex2bin($publicKeyData)),
-            ],
-            [
-                'type'  => 'Op',
-                'value' => 'OP_EQUALVERIFY',
-            ],
-            [
-                'type'  => 'Op',
-                'value' => 'OP_CHECKSIG',
-            ],
-        ];
     }
 }
