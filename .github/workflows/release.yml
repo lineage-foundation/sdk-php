@@ -1,0 +1,22 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Packagist serves the actual version from the git tag itself; this workflow
+# just pings Packagist's API so it re-fetches the repository and picks up the
+# new tag. Requires the package to already be registered on Packagist, and
+# the PACKAGIST_USERNAME / PACKAGIST_TOKEN repo secrets to be set (from the
+# Packagist account's API token page).
+jobs:
+  notify-packagist:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger Packagist update
+        run: |
+          curl -sSf -XPOST -H 'content-type:application/json' \
+            "https://packagist.org/api/update-package?username=${{ secrets.PACKAGIST_USERNAME }}&apiToken=${{ secrets.PACKAGIST_TOKEN }}" \
+            -d '{"repository":{"url":"https://github.com/lineage-foundation/sdk-php"}}'
