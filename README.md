@@ -1,13 +1,6 @@
-# lineage/php
+# Lineage PHP SDK
 
-Composer package for the Lineage blockchain's `/v1` API: wallets, keypairs, item
-assets, and token/item payments.
-
-## Requirements
-
-- PHP >= 8.2
-- The `sodium` extension (bundled with PHP core since 7.2)
-- Composer
+PHP SDK for the Lineage `/v1` REST API: a keyless read client and a key-holding wallet that signs transactions locally.
 
 ## Installation
 
@@ -15,19 +8,19 @@ assets, and token/item payments.
 composer require lineage/php
 ```
 
+Requires PHP >= 8.4, the `sodium` extension, and Composer.
+
 ## Configuration
 
 `Lineage\Client` talks to two hosts:
 
-- **`mempoolHost`** – the node that accepts writes (items, payments) and answers
-  live queries (balances, supply, transaction status).
-- **`storageHost`** – the node that serves stored chain history (blocks, blockchain
-  entries). This can be the same host as `mempoolHost`, or a dedicated
-  read/storage node.
+- **`mempoolHost`** – accepts writes (items, payments) and answers live queries
+  (balances, supply, transaction status).
+- **`storageHost`** – serves stored chain history (blocks, blockchain entries).
+  Can be the same host as `mempoolHost`, or a dedicated read/storage node.
 
-An optional **`apiKey`** is sent as the `x-api-key` header on every request, if set.
-
-An optional **`valenceHost`** is the plaintext mailbox relay 2-way payments
+An optional **`apiKey`** is sent as the `x-api-key` header on every request. An
+optional **`valenceHost`** is the plaintext mailbox relay that 2-way payments
 (`make2WayPayment`/`fetchPending2WayPayment`/`accept2WayPayment`/`reject2WayPayment`)
 exchange DRUID trade offers through; it's only required if you use those methods.
 
@@ -41,9 +34,6 @@ $client = new Client(
     valenceHost: 'https://valence.lineage.to', // optional, required for 2-way payments
 );
 ```
-
-There is no `computeHost`/`intercomHost` split any more — the legacy compute/intercom
-node pair has been replaced by the unified `/v1` mempool/storage API above.
 
 ## Quickstart
 
@@ -68,7 +58,7 @@ $client->openWallet($wallet);
 $keypair = $client->createKeypair();
 echo $keypair->getAddress();
 
-// Check its balance.
+// Check its balance (new/transferred assets appear here only once the mempool confirms them).
 $balance = $client->fetchBalance([$keypair->getAddress()]);
 
 // Create 10 item assets ("Items", the Lineage equivalent of NFTs) at $keypair's
@@ -85,46 +75,7 @@ $client->makeTokenPayment(
 );
 ```
 
-Note that a newly created/transferred asset will only show up in a subsequent
-`fetchBalance` call once it has been confirmed by the mempool.
-
-## Usage reference
-
-### Wallets and keypairs
-
-```php
-$wallet = $client->createWallet();               // new wallet + seed phrase
-$wallet = $client->createWallet($seedPhrase);     // restore from an existing seed phrase
-$opened = $client->openWallet($wallet);           // bool
-$keypair = $client->createKeypair();              // EncryptedKeypairDTO
-$keypair = $client->createKeypair($existingAddresses); // skip already-issued addresses
-```
-
-### Reads
-
-```php
-$client->getSupply();                        // total/issued token supply
-$client->getLatestBlock();                   // most recently stored block
-$client->getBlock($num);                     // a stored block by number
-$client->getBlockchainEntry($key);           // a stored block or transaction by key
-$client->fetchBalance($addresses);           // UTXO balances for one or more addresses
-$client->getTransactionStatus($hashes);      // mempool status for one or more tx hashes
-```
-
-### Writes
-
-```php
-$client->createItems($keypair, $defaultGenesisHash = true, $amount = 1000, $metadata = null);
-
-$client->makeTokenPayment($paymentAddress, $amount, $allKeypairs, $excessKeypair, $locktime = 0);
-
-$client->makeItemPayment($paymentAddress, $amount, $genesisHash, $allKeypairs, $excessKeypair, $metadata = null, $locktime = 0);
-```
-
-`$allKeypairs` is an array of `EncryptedKeypairDTO`s whose combined balance funds the
-payment; `$excessKeypair` receives the change output.
-
-### 2-way payments
+## Two-way (DRUID) payments
 
 DRUID-based dual double-entry trades: two parties each pay an asset to the other,
 atomically correlated by a shared DRUID, and coordinated out-of-band through a
@@ -147,89 +98,33 @@ $client->accept2WayPayment($details, $allKeypairs);
 $client->reject2WayPayment($details, $allKeypairs);
 ```
 
-`make2WayPayment` is stateless on this side: it builds and encrypts this party's
-transaction half, posts the plaintext offer to valence, and hands the pending half
-back to the caller — it does not keep it anywhere itself. The caller must persist that
-return value (e.g. to disk, a database) and pass it back in as one of
-`$storedPendingHalves` on a later `fetchPending2WayPayment` call, which is what
-actually submits and settles it once the counterparty has accepted.
+Two-way trades interoperate across all the SDKs and settle atomically through the mempool's DRUID pool, so either party can be on any SDK.
 
-Because the plaintext valence protocol, the DRUID expectation shapes, and the
-transaction halves are all wire-identical across SDKs, a trade offered by this SDK's
-`make2WayPayment` can be discovered and accepted by
-[`sdk-js`](https://github.com/lineage-foundation/sdk-js)'s or
-[`sdk-go`](https://github.com/lineage-foundation/sdk-go)'s `fetchPending2WayPayment`/
-`accept2WayPayment` (and vice versa) — neither side needs to know which SDK the other
-party is running.
+## Wire compatibility
 
-## Wire compatibility with sdk-js
+Keys and signatures are byte-for-byte compatible across every Lineage SDK — a wallet (mnemonic) created in one derives the same addresses and produces the same signatures in all of them. sdk-js is the reference implementation; BIP39/BIP32 derivation, SHA3-256 addresses, ed25519 signing, and the `/v1` transaction serialization (field order is load-bearing — you sign exactly what you submit) all match it exactly.
 
-This SDK is built to be byte-for-byte compatible with
-[`sdk-js`](https://github.com/lineage-foundation/sdk-js) (the canonical reference
-implementation) at every layer that touches the wire or a signature:
-
-- BIP39/BIP32 key derivation (the same mnemonic derives the same keypairs and
-  addresses as sdk-js/sdk-go/sdk-python).
-- The sha3-256 transaction/item signable hash and the JSON preimage it's computed
-  over.
-- ed25519 signing/verification.
-- The passphrase-derived keystore encryption used to seal keypairs and wallet
-  mnemonics at rest.
-- The `/v1` request/response JSON shapes themselves, including field order — `/v1`
-  responses preserve key order so that "sign what you see" workflows are safe.
-
-In practice, this means a wallet/seed phrase created by sdk-js (or sdk-go, or
-sdk-python) can be opened by this SDK with `createWallet($seedPhrase)` — or vice
-versa — and will derive identical keypairs and addresses, and a transaction signed by
-any one of these SDKs is verifiable, and spendable, by a node regardless of which SDK
-built it.
-
-This is enforced by a shared set of golden test vectors (`tests/fixtures/*.json`)
-generated from sdk-js's own internal crypto primitives — this SDK's unit tests
-(`vendor/bin/phpunit`) assert against those vectors directly, not against a
-reimplementation of the same logic.
-
-## Live end-to-end script
-
-`scripts/e2e.php` exercises this SDK against the live production hosts
-(`mempool.lineage.to` / `storage.lineage.to`):
+## Testing
 
 ```
-php scripts/e2e.php
+vendor/bin/phpunit
 ```
 
-By default it only runs the read methods (`getSupply`, `getLatestBlock`, `getBlock`,
-`fetchBalance`, `getTransactionStatus`) and requires no configuration. Set
-`LINEAGE_E2E_WRITE=1` to also create a wallet and keypairs locally, and additionally
-`LINEAGE_E2E_FUND=1` to fund the sender from the miner and exercise `createItems`,
-`makeTokenPayment` and `makeItemPayment` against the live network. This live e2e is
-intentionally kept out of the default CI workflow (`.github/workflows/ci.yml`), which
-only runs the vector-backed unit test suite.
+The suite asserts against golden test vectors (`tests/fixtures/*.json`) generated from
+sdk-js's own crypto primitives, not a reimplementation of the same logic.
+`scripts/e2e.php` and `scripts/e2e-2way.php` exercise live production hosts (plus
+`valence.lineage.to` for the latter); both require `LINEAGE_E2E_WRITE=1` to write, and
+both are excluded from the default CI workflow (`.github/workflows/ci.yml`).
 
-`scripts/e2e-2way.php` drives a full two-wallet 2-way (DRUID) swap against the same
-live hosts plus `valence.lineage.to`: wallet A mints an item and offers it in exchange
-for tokens from wallet B, B accepts, A settles, and both final balances are polled to
-confirm the swap landed atomically.
+## Lineage SDKs
 
-```
-php scripts/e2e-2way.php                    # local wallet/keypair setup only
-LINEAGE_E2E_WRITE=1 php scripts/e2e-2way.php   # + miner funding and the live swap
-```
-
-As with `e2e.php`, wallet/keypair creation is a local operation and always runs;
-`LINEAGE_E2E_WRITE=1` additionally funds both wallets from the miner faucet and drives
-`make2WayPayment` / `fetchPending2WayPayment` / `accept2WayPayment` against the live
-network. It is likewise excluded from the default CI workflow.
-
-## Links
-
-- [Lineage Foundation](https://lineage.foundation)
-- [Other SDKs](https://github.com/lineage-foundation) – sdk-go, sdk-python, sdk-js, sdk-laravel
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+- [JavaScript / TypeScript](https://github.com/lineage-foundation/sdk-js)
+- [Python](https://github.com/lineage-foundation/sdk-python)
+- [Go](https://github.com/lineage-foundation/sdk-go)
+- [Rust](https://github.com/lineage-foundation/sdk-rust)
+- [PHP](https://github.com/lineage-foundation/sdk-php)
+- [Laravel](https://github.com/lineage-foundation/sdk-laravel)
 
 ## License
 
-MIT – see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
