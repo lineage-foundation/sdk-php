@@ -4,6 +4,8 @@ PHP SDK for the Lineage `/v1` REST API: a keyless read client and a key-holding 
 
 ## Installation
 
+Published on [Packagist](https://packagist.org/packages/lineage/php) as `lineage/php`.
+
 ```
 composer require lineage/php
 ```
