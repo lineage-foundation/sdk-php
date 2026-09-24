@@ -77,6 +77,27 @@ $client->makeTokenPayment(
 );
 ```
 
+## Item metadata
+
+On-chain, an item keeps only its `genesis_hash` after transfer — its metadata is
+dropped on spend. `fetchBalance` transparently restores it: each item UTXO in the
+returned breakdown is enriched with its genesis `metadata`, resolved from the
+storage host (`GET /v1/items/{genesis_hash}`) and cached per client instance.
+
+```php
+$balance = $client->fetchBalance([$keypair->getAddress()]);
+// $balance['address_list'][$addr][0]['value']['Item']['metadata'] is populated.
+
+// Skip enrichment (issues no resolver calls):
+$balance = $client->fetchBalance([$keypair->getAddress()], enrich: false);
+
+// Resolve one item's full genesis facts (metadata, total supply, creator, created block/tx):
+$info = $client->getItemInfo($genesisHash);
+```
+
+Enrichment is best-effort: if the storage host can't resolve an item, that item's
+`metadata` stays `null` and the balance call still succeeds.
+
 ## Two-way (DRUID) payments
 
 DRUID-based dual double-entry trades: two parties each pay an asset to the other,
