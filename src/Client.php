@@ -28,6 +28,15 @@ class Client
 
     private ?ValenceClient $valenceClient = null;
 
+    /**
+     * Per-instance cache of resolved item genesis facts, keyed by
+     * genesis_hash. Metadata is immutable on-chain, so there is no TTL; only
+     * successful (200) resolves are stored, leaving failures retryable.
+     *
+     * @var array<string, array>
+     */
+    private array $itemInfoCache = [];
+
     public function __construct(
         private string $mempoolHost,
         private string $storageHost,
@@ -176,6 +185,52 @@ class Client
             host: $this->storageHost,
             path: '/v1/blockchain-entries/' . rawurlencode($key),
         );
+    }
+
+    /**
+     * Resolves an item's genesis facts (metadata, total supply, provenance) by
+     * its genesis hash. Hits the storage host: GET /v1/items/{genesis_hash}.
+     * On the chain an item keeps only its genesis_hash after transfer, so this
+     * is how a holder recovers the metadata and creation details of a
+     * transferred item. Mirrors sdk-js's Wallet.getItemInfo / sdk-go's
+     * Wallet.GetItemInfo.
+     *
+     * Successful (200) resolves are cached for this Client instance's lifetime
+     * (metadata is immutable); a 404 (unknown item) or any other error throws
+     * LineageApiException and is not cached, so it stays retryable.
+     *
+     * @return array{genesis_hash:string,metadata:?string,total_amount:int,created:array{block_num:int,tx_hash:string},creator_address:?string}
+     */
+    public function getItemInfo(string $genesisHash): array
+    {
+        if (isset($this->itemInfoCache[$genesisHash])) {
+            return $this->itemInfoCache[$genesisHash];
+        }
+
+        $info = $this->request(
+            method: self::GET,
+            host: $this->storageHost,
+            path: '/v1/items/' . rawurlencode($genesisHash),
+        );
+
+        $this->itemInfoCache[$genesisHash] = $info;
+
+        return $info;
+    }
+
+    /**
+     * Best-effort wrapper around getItemInfo used by balance enrichment: it
+     * returns the resolved genesis facts, or null on any failure (unknown
+     * item, storage error, transport fault). Enrichment must never fail the
+     * listing it decorates, so every error is swallowed here.
+     */
+    private function tryResolveItemInfo(string $genesisHash): ?array
+    {
+        try {
+            return $this->getItemInfo($genesisHash);
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     /**
