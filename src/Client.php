@@ -238,11 +238,17 @@ class Client
      * host: POST /v1/balances/query. Returns the `balance` breakdown (total
      * asset amounts and per-address outpoints).
      *
+     * By default the returned item UTXOs are auto-enriched with each item's
+     * genesis metadata, resolved from the storage host (see getItemInfo) and
+     * cached per Client instance. Enrichment is best-effort: a resolver
+     * failure leaves an item's metadata untouched and never fails this call.
+     * Pass $enrich = false to skip enrichment entirely (zero resolver calls).
+     *
      * @param array $addrs
      *
      * @return array
      */
-    public function fetchBalance(array $addrs): array
+    public function fetchBalance(array $addrs, bool $enrich = true): array
     {
         $response = $this->request(
             method: self::POST,
@@ -251,7 +257,67 @@ class Client
             body: ['addresses' => $addrs],
         );
 
-        return $response['balance'] ?? [];
+        $balance = $response['balance'] ?? [];
+
+        if ($enrich && !empty($balance)) {
+            $balance = $this->enrichBalanceItems($balance);
+        }
+
+        return $balance;
+    }
+
+    /**
+     * Attaches genesis metadata to every item UTXO in a balance breakdown
+     * (best-effort). Collects the distinct genesis_hashes among the item
+     * outpoints, resolves the cache-misses via the storage resolver, and
+     * writes each resolved metadata onto its item's value.Item.metadata.
+     *
+     * A resolve miss (unknown item, storage error) leaves that item's existing
+     * metadata untouched, so inline metadata a creator-held item already
+     * carries is never clobbered; only a successful resolve overwrites it.
+     */
+    private function enrichBalanceItems(array $balance): array
+    {
+        $addressList = $balance['address_list'] ?? [];
+
+        if (!is_array($addressList) || $addressList === []) {
+            return $balance;
+        }
+
+        $hashes = [];
+        foreach ($addressList as $outPoints) {
+            foreach ($outPoints as $entry) {
+                $hash = $entry['value']['Item']['genesis_hash'] ?? null;
+                if ($hash !== null) {
+                    $hashes[$hash] = true;
+                }
+            }
+        }
+
+        if ($hashes === []) {
+            return $balance;
+        }
+
+        // Resolve each distinct genesis_hash once; results land in the cache.
+        // Sequential: Guzzle's transport here is synchronous and the cache
+        // makes each hash a single call.
+        foreach (array_keys($hashes) as $hash) {
+            $this->tryResolveItemInfo($hash);
+        }
+
+        foreach ($addressList as $address => $outPoints) {
+            foreach ($outPoints as $i => $entry) {
+                $hash = $entry['value']['Item']['genesis_hash'] ?? null;
+                if ($hash !== null && isset($this->itemInfoCache[$hash])) {
+                    $addressList[$address][$i]['value']['Item']['metadata']
+                        = $this->itemInfoCache[$hash]['metadata'] ?? null;
+                }
+            }
+        }
+
+        $balance['address_list'] = $addressList;
+
+        return $balance;
     }
 
     /**

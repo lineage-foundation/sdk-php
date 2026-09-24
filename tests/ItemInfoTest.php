@@ -123,4 +123,158 @@ class ItemInfoTest extends TestCase
         $this->assertSame(self::infoBody(), $retried);
         $this->assertSame(2, $this->resolverCallCount());
     }
+
+    /** Build a balance response with one item UTXO per (address => genesis_hash, metadata). */
+    private static function balanceResponse(array $addressItems): array
+    {
+        $addressList = [];
+        $n = 0;
+        foreach ($addressItems as $address => $item) {
+            $addressList[$address] = [[
+                'out_point' => ['t_hash' => 't' . $n, 'n' => 0],
+                'value' => ['Item' => [
+                    'amount' => 5,
+                    'genesis_hash' => $item['genesis_hash'],
+                    'metadata' => $item['metadata'] ?? null,
+                ]],
+            ]];
+            $n++;
+        }
+
+        return ['balance' => [
+            'total' => ['tokens' => 0, 'items' => new \stdClass()],
+            'address_list' => $addressList,
+        ]];
+    }
+
+    public function testFetchBalanceEnrichesItemMetadataByDefault(): void
+    {
+        $client = $this->makeClient([
+            self::jsonResponse(200, self::balanceResponse([
+                'addr1' => ['genesis_hash' => self::GH, 'metadata' => null],
+            ])),
+            self::jsonResponse(200, self::infoBody('ticket #1')),
+        ]);
+
+        $balance = $client->fetchBalance(['addr1']);
+
+        $this->assertSame(1, $this->resolverCallCount());
+        $this->assertSame('ticket #1', $balance['address_list']['addr1'][0]['value']['Item']['metadata']);
+    }
+
+    public function testFetchBalanceDedupsDistinctGenesisHashesAcrossAddresses(): void
+    {
+        // Two addresses, SAME genesis_hash => exactly one resolver call.
+        $client = $this->makeClient([
+            self::jsonResponse(200, self::balanceResponse([
+                'addr1' => ['genesis_hash' => self::GH, 'metadata' => null],
+                'addr2' => ['genesis_hash' => self::GH, 'metadata' => null],
+            ])),
+            self::jsonResponse(200, self::infoBody('ticket #1')),
+        ]);
+
+        $balance = $client->fetchBalance(['addr1', 'addr2']);
+
+        $this->assertSame(1, $this->resolverCallCount());
+        $this->assertSame('ticket #1', $balance['address_list']['addr1'][0]['value']['Item']['metadata']);
+        $this->assertSame('ticket #1', $balance['address_list']['addr2'][0]['value']['Item']['metadata']);
+    }
+
+    public function testFetchBalanceRepeatListingIssuesNoFurtherResolverCalls(): void
+    {
+        // Two balance calls, one resolver response queued: the second listing
+        // must serve metadata from cache (a second resolver call would exhaust
+        // the mock and throw).
+        $client = $this->makeClient([
+            self::jsonResponse(200, self::balanceResponse([
+                'addr1' => ['genesis_hash' => self::GH, 'metadata' => null],
+            ])),
+            self::jsonResponse(200, self::infoBody('ticket #1')),
+            self::jsonResponse(200, self::balanceResponse([
+                'addr1' => ['genesis_hash' => self::GH, 'metadata' => null],
+            ])),
+        ]);
+
+        $first = $client->fetchBalance(['addr1']);
+        $second = $client->fetchBalance(['addr1']);
+
+        $this->assertSame(1, $this->resolverCallCount());
+        $this->assertSame('ticket #1', $first['address_list']['addr1'][0]['value']['Item']['metadata']);
+        $this->assertSame('ticket #1', $second['address_list']['addr1'][0]['value']['Item']['metadata']);
+    }
+
+    public function testFetchBalanceGracefulDegradeOnResolverError(): void
+    {
+        $client = $this->makeClient([
+            self::jsonResponse(200, self::balanceResponse([
+                'addr1' => ['genesis_hash' => self::GH, 'metadata' => null],
+            ])),
+            new Response(500, ['Content-Type' => 'application/problem+json'], json_encode([
+                'title' => 'Internal Server Error',
+                'status' => 500,
+            ])),
+        ]);
+
+        $balance = $client->fetchBalance(['addr1']);
+
+        // Listing still succeeds; item metadata stays null (the "no metadata" signal).
+        $this->assertSame(1, $this->resolverCallCount());
+        $this->assertNull($balance['address_list']['addr1'][0]['value']['Item']['metadata']);
+    }
+
+    public function testFetchBalanceDoesNotClobberInlineMetadataOnResolveMiss(): void
+    {
+        // A creator-held item carries inline metadata; the resolve fails.
+        // Enrichment must PRESERVE the existing metadata, not overwrite it.
+        $client = $this->makeClient([
+            self::jsonResponse(200, self::balanceResponse([
+                'addr1' => ['genesis_hash' => self::GH, 'metadata' => 'inline original'],
+            ])),
+            new Response(500, [], ''),
+        ]);
+
+        $balance = $client->fetchBalance(['addr1']);
+
+        $this->assertSame(1, $this->resolverCallCount());
+        $this->assertSame('inline original', $balance['address_list']['addr1'][0]['value']['Item']['metadata']);
+    }
+
+    public function testFetchBalanceOptOutIssuesNoResolverCalls(): void
+    {
+        // Only the balance response is queued: if enrichment fired, the
+        // resolver GET would exhaust the mock and throw.
+        $client = $this->makeClient([
+            self::jsonResponse(200, self::balanceResponse([
+                'addr1' => ['genesis_hash' => self::GH, 'metadata' => null],
+            ])),
+        ]);
+
+        $balance = $client->fetchBalance(['addr1'], enrich: false);
+
+        $this->assertSame(0, $this->resolverCallCount());
+        $this->assertNull($balance['address_list']['addr1'][0]['value']['Item']['metadata']);
+    }
+
+    public function testFetchBalanceEnrichmentSkipsTokenOnlyBalances(): void
+    {
+        // No item UTXOs => zero resolver calls, balance returned untouched.
+        $client = $this->makeClient([
+            self::jsonResponse(200, [
+                'balance' => [
+                    'total' => ['tokens' => 42, 'items' => new \stdClass()],
+                    'address_list' => [
+                        'addr1' => [[
+                            'out_point' => ['t_hash' => 't0', 'n' => 0],
+                            'value' => ['Token' => 42],
+                        ]],
+                    ],
+                ],
+            ]),
+        ]);
+
+        $balance = $client->fetchBalance(['addr1']);
+
+        $this->assertSame(0, $this->resolverCallCount());
+        $this->assertSame(42, $balance['address_list']['addr1'][0]['value']['Token']);
+    }
 }
