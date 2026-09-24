@@ -164,12 +164,16 @@ class ItemInfoTest extends TestCase
 
     public function testFetchBalanceDedupsDistinctGenesisHashesAcrossAddresses(): void
     {
-        // Two addresses, SAME genesis_hash => exactly one resolver call.
+        // Two addresses, SAME genesis_hash => exactly one resolver call. A
+        // second resolver success is ALSO queued so a non-deduped impl (one
+        // resolver call per address) genuinely consumes and records it,
+        // pushing the count to 2 and failing this assertion.
         $client = $this->makeClient([
             self::jsonResponse(200, self::balanceResponse([
                 'addr1' => ['genesis_hash' => self::GH, 'metadata' => null],
                 'addr2' => ['genesis_hash' => self::GH, 'metadata' => null],
             ])),
+            self::jsonResponse(200, self::infoBody('ticket #1')),
             self::jsonResponse(200, self::infoBody('ticket #1')),
         ]);
 
@@ -182,9 +186,10 @@ class ItemInfoTest extends TestCase
 
     public function testFetchBalanceRepeatListingIssuesNoFurtherResolverCalls(): void
     {
-        // Two balance calls, one resolver response queued: the second listing
-        // must serve metadata from cache (a second resolver call would exhaust
-        // the mock and throw).
+        // Two balance calls. A SECOND resolver success (with visibly
+        // different metadata) is also queued, so if the cache were broken
+        // the second listing would genuinely consume and record it, both
+        // pushing the count to 2 and swapping in the "DIFFERENT" metadata.
         $client = $this->makeClient([
             self::jsonResponse(200, self::balanceResponse([
                 'addr1' => ['genesis_hash' => self::GH, 'metadata' => null],
@@ -193,6 +198,7 @@ class ItemInfoTest extends TestCase
             self::jsonResponse(200, self::balanceResponse([
                 'addr1' => ['genesis_hash' => self::GH, 'metadata' => null],
             ])),
+            self::jsonResponse(200, self::infoBody('DIFFERENT metadata')),
         ]);
 
         $first = $client->fetchBalance(['addr1']);
@@ -241,12 +247,14 @@ class ItemInfoTest extends TestCase
 
     public function testFetchBalanceOptOutIssuesNoResolverCalls(): void
     {
-        // Only the balance response is queued: if enrichment fired, the
-        // resolver GET would exhaust the mock and throw.
+        // A resolver success is ALSO queued: if the enrich=false gate were
+        // removed (or ignored), enrichment would genuinely consume and
+        // record it, pushing the count to 1 and failing this assertion.
         $client = $this->makeClient([
             self::jsonResponse(200, self::balanceResponse([
                 'addr1' => ['genesis_hash' => self::GH, 'metadata' => null],
             ])),
+            self::jsonResponse(200, self::infoBody('ticket #1')),
         ]);
 
         $balance = $client->fetchBalance(['addr1'], enrich: false);

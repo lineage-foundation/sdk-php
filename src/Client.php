@@ -537,7 +537,7 @@ class Client
             $keyPairs[$encrypted->getAddress()] = $decrypted;
         }
 
-        $balance = $this->fetchBalance($addresses);
+        $balance = $this->fetchBalance($addresses, enrich: false);
 
         $tx = TxBuilder::createPaymentTx(
             $paymentAddress,
@@ -599,7 +599,7 @@ class Client
 
         $senderKeyPair = $this->decryptKeypair($receiveKeypair->getContent(), $receiveKeypair->getNonce());
 
-        $balance = $this->fetchBalance($addresses);
+        $balance = $this->fetchBalance($addresses, enrich: false);
 
         $druid = KeyHelpers::generateDRUID();
 
@@ -821,7 +821,7 @@ class Client
         $details['status'] = $status;
 
         if ($status === self::TRANSACTION_STATUS_ACCEPTED) {
-            $balance = $this->fetchBalance($addresses);
+            $balance = $this->fetchBalance($addresses, enrich: false);
 
             $myHalf = TxBuilder::create2WTxHalf(
                 $details['druid'],
